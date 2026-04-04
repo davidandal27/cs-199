@@ -40,7 +40,7 @@ Our work is built upon the [Baseline-AASIST](https://github.com/asvspoof-challen
 ## Citation
 ```
 @ARTICLE{Nes2Net,
-  author={Liu, Tianchi and Truong, Duc-Tuan and Kumar Das, Rohan and Aik Lee, Kong and Li, Haizhou},
+  author={Liu, Tianchi and Truong, Duc-Tuan and Das, Rohan Kumar and Lee, Kong Aik and Li, Haizhou},
   journal={IEEE Transactions on Information Forensics and Security}, 
   title={Nes2Net: A Lightweight Nested Architecture for Foundation Model Driven Speech Anti-Spoofing}, 
   year={2025},
