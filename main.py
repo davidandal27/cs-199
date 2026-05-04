@@ -22,9 +22,10 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchcontrib.optim import SWA
 
-from data_utils import (TrainDataset,TestDataset, genSpoof_list)
+from src.data_utils import (TrainDataset,TestDataset, genSpoof_list)
 from eval.calculate_metrics import calculate_minDCF_EER_CLLR, calculate_aDCF_tdcf_tEER
-from utils import create_optimizer, seed_worker, set_seed, str_to_bool
+from src.path_utils import apply_path_overrides, resolve_workflow_paths
+from src.utils import create_optimizer, seed_worker, set_seed, str_to_bool
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 from tqdm import tqdm
@@ -37,6 +38,13 @@ def main(args: argparse.Namespace) -> None:
     # load experiment configurations
     with open(args.config, "r") as f_json:
         config = json.loads(f_json.read())
+    workflow_paths = resolve_workflow_paths(
+        config=config,
+        output_dir=args.output_dir,
+        model_weights_path=args.eval_model_weights,
+        require_training_assets=args.train,
+    )
+    config = apply_path_overrides(config, workflow_paths)
     model_config = config["model_config"]
     optim_config = config["optim_config"]
     optim_config["epochs"] = config["num_epochs"]
@@ -47,10 +55,10 @@ def main(args: argparse.Namespace) -> None:
     set_seed(args.seed, config)
 
     # define database related paths
-    output_dir = Path(args.output_dir)
-    database_path = Path(config["database_path"])
-    dev_trial_path = (database_path /
-                      "ASVspoof5.dev.track_1.tsv")
+    output_dir = workflow_paths.output_dir
+    database_path = workflow_paths.dataset_root
+    metadata_path = workflow_paths.metadata_root
+    dev_trial_path = workflow_paths.dev_metadata
     # define model related paths
     model_tag = config["model_tag"]
     model_tag = output_dir / model_tag
@@ -71,7 +79,7 @@ def main(args: argparse.Namespace) -> None:
 
     # define dataloaders
     trn_loader, dev_loader, eval_loader = get_loader(
-        database_path, args.seed, config)
+        database_path, metadata_path, args.seed, config)
 
 
     # get optimizer and scheduler
@@ -140,10 +148,10 @@ def main(args: argparse.Namespace) -> None:
     # evaluates pretrained model 
     # NOTE: Currently it is evaluated on the development set instead of the evaluation set
     if args.eval:
-        eval_trial_path = (database_path / "ASVspoof5.eval.track_1.tsv") 
-        model.load_state_dict(
-            torch.load(os.path.join(model_save_path, 'best_model.pth'), map_location=device))
-        print("Model loaded : {}".format(os.path.join(model_save_path, 'best_model.pth')))
+        eval_trial_path = workflow_paths.eval_metadata
+        model_path = workflow_paths.model_weights_path or (model_save_path / "best_model.pth")
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        print("Model loaded : {}".format(model_path))
         print("Start evaluation...")
         produce_evaluation_file(eval_loader, model, device,
                                 eval_score_path, eval_trial_path)
@@ -167,6 +175,7 @@ def get_model(model_config: Dict, device: torch.device):
 
 def get_loader(
         database_path: str,
+        metadata_path: str,
         seed: int,
         config: dict) -> List[torch.utils.data.DataLoader]:
     """Make PyTorch DataLoaders for train / developement"""
@@ -175,11 +184,11 @@ def get_loader(
     dev_database_path = database_path / "flac_D/"
     eval_database_path = database_path / "eval_full/flac_E_eval/"
 
-    trn_list_path = (database_path /
+    trn_list_path = (metadata_path /
                      "ASVspoof5.train.tsv")
-    dev_trial_path = (database_path /
+    dev_trial_path = (metadata_path /
                       "ASVspoof5.dev.track_1.tsv")
-    eval_trial_path = (database_path /
+    eval_trial_path = (metadata_path /
                       "ASVspoof5.eval.track_1.tsv")
     d_label_trn, file_train = genSpoof_list(dir_meta=trn_list_path)
     print("no. training files:", len(file_train))
@@ -187,7 +196,9 @@ def get_loader(
     train_set = TrainDataset(list_IDs=file_train,
                                            labels=d_label_trn,
                                            base_dir=trn_database_path,
-                                           add_noise=str_to_bool(config["add_noise"]))
+                                           add_noise=str_to_bool(config["add_noise"]),
+                                           musan_path=config.get("musan_path", "musan_data"),
+                                           rir_path=config.get("rir_path", "RIR_data"))
     gen = torch.Generator()
     gen.manual_seed(seed)
     trn_loader = DataLoader(train_set,
