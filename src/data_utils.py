@@ -4,23 +4,47 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 import random
-from musan import Musan
-from rir import RIRReverberation
+from .musan import Musan
+from .rir import RIRReverberation
 
 ___author__ = "Hemlata Tak, Jee-weon Jung"
 __email__ = "tak@eurecom.fr, jeeweon.jung@navercorp.com"
 
+LABEL_MAP = {
+    "bonafide": 1,
+    "spoof": 0,
+}
+
+
+def parse_trial_line(line):
+    fields = line.strip().split(" ")
+    if len(fields) != 10:
+        raise ValueError(f"Expected 10 fields in trial line, got {len(fields)}: {line.strip()}")
+
+    spk_id, key, _, _, _, _, _, _, label, _ = fields
+    if label not in LABEL_MAP:
+        raise ValueError(f"Unsupported label '{label}' in trial line: {line.strip()}")
+
+    return {
+        "speaker_id": spk_id,
+        "utterance_id": key,
+        "label_name": label,
+        "label": LABEL_MAP[label],
+        "trial_line": line.rstrip("\n"),
+    }
+
+
+def load_trial_records(dir_meta):
+    with open(dir_meta, "r") as file:
+        return [parse_trial_line(line) for line in file if line.strip()]
+
 
 def genSpoof_list(dir_meta):
-
     d_meta = {}
     file_list = []
-    with open(dir_meta, "r") as f:
-        l_meta = f.readlines()
-    for line in l_meta:
-        _, key, _, _, _, _, _, _, label, _ = line.strip().split(" ")
-        file_list.append(key)
-        d_meta[key] = 1 if label == "bonafide" else 0
+    for record in load_trial_records(dir_meta):
+        file_list.append(record["utterance_id"])
+        d_meta[record["utterance_id"]] = record["label"]
     return d_meta, file_list
     """
     if is_train:
@@ -66,23 +90,32 @@ def pad_random(x: np.ndarray, max_len: int = 64600):
 
 
 class TrainDataset(Dataset):
-    def __init__(self, list_IDs, labels, base_dir, add_noise=False):
+    def __init__(
+        self,
+        list_IDs,
+        labels,
+        base_dir,
+        add_noise=False,
+        musan_path="musan_data",
+        rir_path="RIR_data",
+    ):
         """self.list_IDs	: list of strings (each string: utt key),
            self.labels      : dictionary (key: utt key, value: label integer)"""
         self.list_IDs = list_IDs
         self.labels = labels
         self.base_dir = base_dir
         self.cut = 64600  # take ~4 sec audio (64600 samples)
+        self.add_noise = add_noise
 
         self.DA = {}
-        self.DA['MUS'] = Musan(
-                    'musan_data'
-                )
         self.category = ['noise','speech','music']
-        self.DA['RIR'] = RIRReverberation(
-                    'RIR_data'
-                )
-        self.add_noise = add_noise
+        if self.add_noise:
+            self.DA['MUS'] = Musan(
+                        str(musan_path)
+                    )
+            self.DA['RIR'] = RIRReverberation(
+                        str(rir_path)
+                    )
     def __len__(self):
         return len(self.list_IDs)
 
@@ -119,3 +152,26 @@ class TestDataset(Dataset):
         X_pad = pad(X, self.cut)
         x_inp = Tensor(X_pad)
         return x_inp, key
+
+
+class LabeledEvalDataset(Dataset):
+    def __init__(self, trial_records, base_dir, return_trial_line=False):
+        self.trial_records = trial_records
+        self.base_dir = base_dir
+        self.return_trial_line = return_trial_line
+        self.cut = 64600
+
+    def __len__(self):
+        return len(self.trial_records)
+
+    def __getitem__(self, index):
+        record = self.trial_records[index]
+        key = record["utterance_id"]
+        X, _ = sf.read(str(self.base_dir / f"{key}.flac"))
+        X_pad = pad(X, self.cut)
+        x_inp = Tensor(X_pad)
+
+        if self.return_trial_line:
+            return x_inp, record["label"], key, record["trial_line"]
+
+        return x_inp, record["label"], key
