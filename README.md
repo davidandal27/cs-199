@@ -30,6 +30,72 @@ To train & evaluate the model:
 ```
 python ./main.py --config ./config/WavLM_Nes2Net_ASVspoof5.conf
 ```
+
+To run clean eval-only scoring from a pretrained checkpoint:
+```bash
+python ./eval_fgsm.py \
+  --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
+  --weights /path/to/checkpoint.pth \
+  --output-dir /path/to/output \
+  --dataset-root /path/to/data \
+  --metadata-root /path/to/data \
+  --ssl-pretrained-path /path/to/WavLM-Large.pt \
+  --split eval
+```
+
+This eval-only path is intended for Colab and Google Drive backed assets, and it writes a score file plus a metric report without entering the training loop.
+
+To run matched clean and FGSM scoring from the same ordered trial list:
+```bash
+python ./eval_fgsm.py \
+  --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
+  --weights /path/to/checkpoint.pth \
+  --output-dir /path/to/output \
+  --dataset-root /path/to/data \
+  --metadata-root /path/to/data \
+  --ssl-pretrained-path /path/to/WavLM-Large.pt \
+  --split eval \
+  --epsilon 0.001 \
+  --batch-size 8 \
+  --save-adv-audio
+```
+
+If you want to point at an explicit trial list instead of `--metadata-root`, pass `--trial-file /path/to/ASVspoof5.eval.track_1.tsv` and keep `--split` aligned with the audio tree you want to score.
+
+## Colab FGSM Workflow
+
+The repository includes [`notebooks/fgsm_eval_colab.ipynb`](notebooks/fgsm_eval_colab.ipynb) for a step-by-step Google Colab flow. The notebook is organized as:
+
+- mount Google Drive
+- enter the repo and install dependencies
+- define Drive-backed dataset, checkpoint, backbone, and output paths
+- validate those paths before scoring
+- run clean evaluation
+- run FGSM scoring
+- inspect the clean vs adversarial summary artifacts
+
+Minimal Colab CLI example with explicit Drive-backed paths:
+```bash
+python ./eval_fgsm.py \
+  --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
+  --weights "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/checkpoints/model.pth" \
+  --output-dir "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/outputs" \
+  --dataset-root "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/data" \
+  --metadata-root "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/data" \
+  --ssl-pretrained-path "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/pretrained_models/WavLM-Large.pt" \
+  --split eval \
+  --epsilon 0.001
+```
+
+## Repository Layout
+- `main.py`: training and evaluation entrypoint
+- `src/`: helper modules for datasets, augmentation, path resolution, and training utilities
+- `models/`: model architecture definitions
+- `eval/`: evaluation metric helpers
+- `config/`: experiment configuration files
+- `docs/`: reference documentation and paper artifacts
+- `notebooks/`: Colab and notebook workflows
+
 ### Acknowledge
 Our work is built upon the [Baseline-AASIST](https://github.com/asvspoof-challenge/asvspoof5/tree/main/Baseline-AASIST) We also follow some parts of the following codebases:
 
