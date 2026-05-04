@@ -158,11 +158,10 @@ class SSLModel(nn.Module):
 """
 
 class SSLModel(nn.Module):
-    def __init__(self,device):
+    def __init__(self, device, ssl_pretrained_path):
         super(SSLModel, self).__init__()
-        
-        cp_path = 'pretrained_models/WavLM-Large.pt'   # Change the pre-trained XLSR model path. 
-        checkpoint = torch.load(cp_path)
+
+        checkpoint = torch.load(ssl_pretrained_path)
         cfg = WavLMConfig(checkpoint['cfg'])
         self.model = WavLM(cfg)
         self.loadParameters(checkpoint['model'])
@@ -313,7 +312,10 @@ class Model(nn.Module):
     def __init__(self, args, device):
         super(Model, self).__init__()
         self.device = device
-        self.ssl_model = SSLModel(self.device)
+        self.ssl_model = SSLModel(
+            self.device,
+            args.get("ssl_pretrained_path", "pretrained_models/WavLM-Large.pt"),
+        )
         print('args', args)
         self.Nested_Res2Net_TDNN = Nested_Res2Net_TDNN(
             Nes_ratio=args['Nes_ratio'], 
