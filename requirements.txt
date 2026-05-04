@@ -1,5 +1,6 @@
 torchcontrib
 numpy
 soundfile
+scipy
 tensorboard
 tqdm
