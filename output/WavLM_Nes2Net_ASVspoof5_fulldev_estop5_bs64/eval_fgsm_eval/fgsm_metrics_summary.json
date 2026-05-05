@@ -1,0 +1,46 @@
+{
+  "split": "eval",
+  "architecture": "wavlm_nes2net",
+  "checkpoint_path": "/Users/dundale/Downloads/epoch_14_0.051.pth",
+  "dataset_root": "/Users/dundale/Downloads",
+  "trial_file": "/Users/dundale/Downloads/repos-acads/cs-199/ASVspoof5.eval.local_4.tsv",
+  "output_dir": "/Users/dundale/Downloads/repos-acads/cs-199/output/WavLM_Nes2Net_ASVspoof5_fulldev_estop5_bs64/eval_fgsm_eval",
+  "device": "cpu",
+  "batch_size": 1,
+  "epsilon": 0.001,
+  "clamp_min": -1.0,
+  "clamp_max": 1.0,
+  "clean_score_path": "/Users/dundale/Downloads/repos-acads/cs-199/output/WavLM_Nes2Net_ASVspoof5_fulldev_estop5_bs64/eval_fgsm_eval/clean_scores.txt",
+  "adv_score_path": "/Users/dundale/Downloads/repos-acads/cs-199/output/WavLM_Nes2Net_ASVspoof5_fulldev_estop5_bs64/eval_fgsm_eval/fgsm_eps_0p001_scores.txt",
+  "clean_metrics_path": "/Users/dundale/Downloads/repos-acads/cs-199/output/WavLM_Nes2Net_ASVspoof5_fulldev_estop5_bs64/eval_fgsm_eval/clean_metrics.txt",
+  "adv_metrics_path": "/Users/dundale/Downloads/repos-acads/cs-199/output/WavLM_Nes2Net_ASVspoof5_fulldev_estop5_bs64/eval_fgsm_eval/fgsm_eps_0p001_metrics.txt",
+  "adv_audio_dir": null,
+  "utterance_count": 4,
+  "metrics": {
+    "min_dcf": {
+      "clean": 0.0,
+      "adversarial": 0.0,
+      "absolute_delta": 0.0,
+      "relative_delta": null
+    },
+    "eer": {
+      "clean": 0.0,
+      "adversarial": 0.0,
+      "absolute_delta": 0.0,
+      "relative_delta": null
+    },
+    "cllr": {
+      "clean": 0.0536011747,
+      "adversarial": 0.91841481507,
+      "absolute_delta": 0.86481364037,
+      "relative_delta": 16.134229244233335
+    }
+  },
+  "attack_stats": {
+    "loss": 0.004170370083045327,
+    "epsilon": 0.001,
+    "max_abs_perturbation": 0.0010000020265579224,
+    "mean_abs_perturbation": 0.0009968918457161635,
+    "mean_l2_perturbation": 0.2537790387868881
+  }
+}
