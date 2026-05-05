@@ -38,7 +38,8 @@ python ./eval_fgsm.py \
   --weights /path/to/checkpoint.pth \
   --output-dir /path/to/output \
   --dataset-root /path/to/data \
-  --metadata-root /path/to/data \
+  --audio-root /path/to/eval_audio \
+  --trial-file /path/to/ASVspoof5.eval.track_1.tsv \
   --ssl-pretrained-path /path/to/WavLM-Large.pt \
   --split eval
 ```
@@ -52,7 +53,8 @@ python ./eval_fgsm.py \
   --weights /path/to/checkpoint.pth \
   --output-dir /path/to/output \
   --dataset-root /path/to/data \
-  --metadata-root /path/to/data \
+  --audio-root /path/to/eval_audio \
+  --trial-file /path/to/ASVspoof5.eval.track_1.tsv \
   --ssl-pretrained-path /path/to/WavLM-Large.pt \
   --split eval \
   --epsilon 0.001 \
@@ -60,7 +62,7 @@ python ./eval_fgsm.py \
   --save-adv-audio
 ```
 
-If you want to point at an explicit trial list instead of `--metadata-root`, pass `--trial-file /path/to/ASVspoof5.eval.track_1.tsv` and keep `--split` aligned with the audio tree you want to score.
+If your audio and TSV files are not under the same dataset root, pass `--audio-root` to the directory that actually contains the `.flac` files for the active split and `--trial-file` to the exact TSV you want to score. `--dataset-root` can still point to any existing dataset base directory for compatibility with the config.
 
 ## Colab FGSM Workflow
 

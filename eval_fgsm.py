@@ -46,6 +46,13 @@ def parse_args() -> argparse.Namespace:
         help="Optional explicit dev/eval trial file override. Keep it aligned with --split.",
     )
     parser.add_argument(
+        "--audio-root",
+        "--audio_root",
+        dest="audio_root",
+        default=None,
+        help="Optional explicit audio directory override for the selected split.",
+    )
+    parser.add_argument(
         "--ssl-pretrained-path",
         "--ssl_pretrained_path",
         dest="ssl_pretrained_path",
@@ -124,6 +131,7 @@ def main() -> None:
             dataset_root=args.dataset_root,
             metadata_root=args.metadata_root,
             trial_file=args.trial_file,
+            audio_root=args.audio_root,
             ssl_pretrained_path=args.ssl_pretrained_path,
             batch_size=args.batch_size,
             epsilon=args.epsilon,
@@ -176,6 +184,7 @@ def main() -> None:
         dataset_root=args.dataset_root,
         metadata_root=args.metadata_root,
         trial_file=args.trial_file,
+        audio_root=args.audio_root,
         ssl_pretrained_path=args.ssl_pretrained_path,
         batch_size=args.batch_size,
         score_filename=args.score_filename,

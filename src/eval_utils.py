@@ -1,9 +1,23 @@
 import json
+import warnings
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.path_utils import apply_path_overrides, resolve_workflow_paths
+
+
+def resolve_eval_device():
+    import torch
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type != "cuda":
+        warnings.warn(
+            "GPU not detected; falling back to CPU. Evaluation may be slow.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return device
 
 
 def load_eval_config(
@@ -25,6 +39,20 @@ def load_eval_config(
     return config
 
 
+def apply_eval_path_fallbacks(
+    config: Dict[str, Any],
+    dataset_root: Optional[str] = None,
+    metadata_root: Optional[str] = None,
+    trial_file: Optional[str] = None,
+    audio_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    if dataset_root is None and audio_root is not None:
+        config["database_path"] = str(Path(audio_root).expanduser().resolve(strict=False).parent)
+    if metadata_root is None and trial_file is not None:
+        config["metadata_path"] = str(Path(trial_file).expanduser().resolve(strict=False).parent)
+    return config
+
+
 def build_eval_loader(
     paths,
     batch_size: int,
@@ -38,6 +66,11 @@ def build_eval_loader(
     trial_path = trial_path or default_trial_path
 
     _, utterance_ids = genSpoof_list(dir_meta=trial_path)
+    validate_trial_audio_files(
+        utterance_ids=utterance_ids,
+        audio_root=audio_root,
+        trial_path=trial_path,
+    )
     eval_set = TestDataset(list_IDs=utterance_ids, base_dir=audio_root)
     data_loader = DataLoader(
         eval_set,
@@ -63,6 +96,11 @@ def build_labeled_eval_loader(
     trial_path = trial_path or default_trial_path
 
     trial_records = load_trial_records(trial_path)
+    validate_trial_audio_files(
+        utterance_ids=[record["utterance_id"] for record in trial_records],
+        audio_root=audio_root,
+        trial_path=trial_path,
+    )
     eval_set = LabeledEvalDataset(
         trial_records=trial_records,
         base_dir=audio_root,
@@ -80,10 +118,38 @@ def build_labeled_eval_loader(
 
 def resolve_split_paths(paths, split: str):
     if split == "dev":
+        if paths.dev_metadata is None or paths.dev_audio_root is None:
+            raise ValueError("Dev split assets are not configured.")
         return paths.dev_metadata, paths.dev_audio_root
     if split == "eval":
+        if paths.eval_metadata is None or paths.eval_audio_root is None:
+            raise ValueError("Eval split assets are not configured.")
         return paths.eval_metadata, paths.eval_audio_root
     raise ValueError(f"Unsupported split '{split}'. Use 'dev' or 'eval'.")
+
+
+def validate_trial_audio_files(
+    utterance_ids: List[str],
+    audio_root: Path,
+    trial_path: Path,
+) -> None:
+    missing = []
+    for utt_id in utterance_ids:
+        if not (audio_root / f"{utt_id}.flac").is_file():
+            missing.append(utt_id)
+            if len(missing) >= 10:
+                break
+
+    if not missing:
+        return
+
+    raise FileNotFoundError(
+        "Trial file and audio directory do not match. "
+        f"Missing {len(missing)} or more files from '{audio_root}' referenced by "
+        f"'{trial_path}'. Example utterance IDs: {', '.join(missing)}. "
+        "Check that --trial-file and --audio-root point to the same dataset split "
+        "and that the audio directory is complete."
+    )
 
 
 def build_model(model_config: Dict[str, Any], device):
@@ -390,6 +456,7 @@ def run_clean_evaluation(
     dataset_root: Optional[str] = None,
     metadata_root: Optional[str] = None,
     trial_file: Optional[str] = None,
+    audio_root: Optional[str] = None,
     ssl_pretrained_path: Optional[str] = None,
     batch_size: Optional[int] = None,
     score_filename: Optional[str] = None,
@@ -400,6 +467,13 @@ def run_clean_evaluation(
         metadata_root=metadata_root,
         ssl_pretrained_path=ssl_pretrained_path,
     )
+    config = apply_eval_path_fallbacks(
+        config=config,
+        dataset_root=dataset_root,
+        metadata_root=metadata_root,
+        trial_file=trial_file,
+        audio_root=audio_root,
+    )
     import torch
 
     paths = resolve_workflow_paths(
@@ -407,19 +481,16 @@ def run_clean_evaluation(
         output_dir=output_dir,
         model_weights_path=weights_path,
         require_training_assets=False,
+        require_dev_assets=split == "dev" and trial_file is None,
+        require_eval_assets=split == "eval" and trial_file is None,
+        dev_audio_root_override=audio_root if split == "dev" else None,
+        eval_audio_root_override=audio_root if split == "eval" else None,
+        dev_metadata_override=trial_file if split == "dev" else None,
+        eval_metadata_override=trial_file if split == "eval" else None,
     )
     config = apply_path_overrides(config, paths)
-    resolved_trial_file = (
-        Path(trial_file).expanduser().resolve(strict=False) if trial_file else None
-    )
-    if resolved_trial_file is not None and not resolved_trial_file.is_file():
-        raise FileNotFoundError(
-            f"Expected trial file at '{resolved_trial_file}', but it was not found."
-        )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type != "cuda":
-        raise ValueError("GPU not detected!")
+    device = resolve_eval_device()
 
     model = build_model(config["model_config"], device)
     model.load_state_dict(torch.load(paths.model_weights_path, map_location=device))
@@ -429,7 +500,6 @@ def run_clean_evaluation(
         paths=paths,
         batch_size=effective_batch_size,
         split=split,
-        trial_path=resolved_trial_file,
     )
 
     run_dir = paths.output_dir / config["model_tag"] / f"{split}_clean_eval"
@@ -467,6 +537,7 @@ def run_fgsm_scoring_pipeline(
     dataset_root: Optional[str] = None,
     metadata_root: Optional[str] = None,
     trial_file: Optional[str] = None,
+    audio_root: Optional[str] = None,
     ssl_pretrained_path: Optional[str] = None,
     batch_size: Optional[int] = None,
     epsilon: float = 0.001,
@@ -482,6 +553,13 @@ def run_fgsm_scoring_pipeline(
         metadata_root=metadata_root,
         ssl_pretrained_path=ssl_pretrained_path,
     )
+    config = apply_eval_path_fallbacks(
+        config=config,
+        dataset_root=dataset_root,
+        metadata_root=metadata_root,
+        trial_file=trial_file,
+        audio_root=audio_root,
+    )
     import torch
 
     paths = resolve_workflow_paths(
@@ -489,19 +567,16 @@ def run_fgsm_scoring_pipeline(
         output_dir=output_dir,
         model_weights_path=weights_path,
         require_training_assets=False,
+        require_dev_assets=split == "dev" and trial_file is None,
+        require_eval_assets=split == "eval" and trial_file is None,
+        dev_audio_root_override=audio_root if split == "dev" else None,
+        eval_audio_root_override=audio_root if split == "eval" else None,
+        dev_metadata_override=trial_file if split == "dev" else None,
+        eval_metadata_override=trial_file if split == "eval" else None,
     )
     config = apply_path_overrides(config, paths)
-    resolved_trial_file = (
-        Path(trial_file).expanduser().resolve(strict=False) if trial_file else None
-    )
-    if resolved_trial_file is not None and not resolved_trial_file.is_file():
-        raise FileNotFoundError(
-            f"Expected trial file at '{resolved_trial_file}', but it was not found."
-        )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type != "cuda":
-        raise ValueError("GPU not detected!")
+    device = resolve_eval_device()
 
     model = build_model(config["model_config"], device)
     model.load_state_dict(torch.load(paths.model_weights_path, map_location=device))
@@ -511,7 +586,6 @@ def run_fgsm_scoring_pipeline(
         paths,
         effective_batch_size,
         split,
-        trial_path=resolved_trial_file,
     )
 
     run_dir = paths.output_dir / config["model_tag"] / f"{split}_fgsm_eval"

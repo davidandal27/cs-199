@@ -11,11 +11,11 @@ class WorkflowPaths:
     dataset_root: Path
     metadata_root: Path
     train_audio_root: Optional[Path]
-    dev_audio_root: Path
-    eval_audio_root: Path
+    dev_audio_root: Optional[Path]
+    eval_audio_root: Optional[Path]
     train_metadata: Optional[Path]
-    dev_metadata: Path
-    eval_metadata: Path
+    dev_metadata: Optional[Path]
+    eval_metadata: Optional[Path]
     ssl_pretrained_path: Path
     output_dir: Path
     model_weights_path: Optional[Path] = None
@@ -28,6 +28,12 @@ def resolve_workflow_paths(
     output_dir: str,
     model_weights_path: Optional[str] = None,
     require_training_assets: bool = True,
+    require_dev_assets: bool = True,
+    require_eval_assets: bool = True,
+    dev_audio_root_override: Optional[str] = None,
+    eval_audio_root_override: Optional[str] = None,
+    dev_metadata_override: Optional[str] = None,
+    eval_metadata_override: Optional[str] = None,
 ) -> WorkflowPaths:
     dataset_root = _resolve_dir(config["database_path"], "dataset root")
     metadata_root = _resolve_dir(
@@ -43,11 +49,27 @@ def resolve_workflow_paths(
             if require_training_assets
             else None
         ),
-        dev_audio_root=_resolve_child_dir(dataset_root, "flac_D", "dev audio root"),
-        eval_audio_root=_resolve_child_dir(
-            dataset_root,
-            "eval_full/flac_E_eval",
-            "eval audio root",
+        dev_audio_root=(
+            _resolve_dir(dev_audio_root_override, "dev audio root")
+            if dev_audio_root_override is not None
+            else (
+                _resolve_child_dir(dataset_root, "flac_D", "dev audio root")
+                if require_dev_assets
+                else None
+            )
+        ),
+        eval_audio_root=(
+            _resolve_dir(eval_audio_root_override, "eval audio root")
+            if eval_audio_root_override is not None
+            else (
+                _resolve_child_dir(
+                    dataset_root,
+                    "eval_full/flac_E_eval",
+                    "eval audio root",
+                )
+                if require_eval_assets
+                else None
+            )
         ),
         train_metadata=(
             _resolve_child_file(
@@ -58,15 +80,31 @@ def resolve_workflow_paths(
             if require_training_assets
             else None
         ),
-        dev_metadata=_resolve_child_file(
-            metadata_root,
-            "ASVspoof5.dev.track_1.tsv",
-            "dev metadata file",
+        dev_metadata=(
+            _resolve_file(dev_metadata_override, "dev metadata file")
+            if dev_metadata_override is not None
+            else (
+                _resolve_child_file(
+                    metadata_root,
+                    "ASVspoof5.dev.track_1.tsv",
+                    "dev metadata file",
+                )
+                if require_dev_assets
+                else None
+            )
         ),
-        eval_metadata=_resolve_child_file(
-            metadata_root,
-            "ASVspoof5.eval.track_1.tsv",
-            "eval metadata file",
+        eval_metadata=(
+            _resolve_file(eval_metadata_override, "eval metadata file")
+            if eval_metadata_override is not None
+            else (
+                _resolve_child_file(
+                    metadata_root,
+                    "ASVspoof5.eval.track_1.tsv",
+                    "eval metadata file",
+                )
+                if require_eval_assets
+                else None
+            )
         ),
         ssl_pretrained_path=_resolve_file(
             config["model_config"].get(

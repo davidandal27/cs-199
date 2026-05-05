@@ -4,6 +4,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 import random
+from pathlib import Path
 from .musan import Musan
 from .rir import RIRReverberation
 
@@ -14,6 +15,17 @@ LABEL_MAP = {
     "bonafide": 1,
     "spoof": 0,
 }
+
+
+def read_audio_file(audio_path):
+    audio_path = Path(audio_path)
+    if not audio_path.is_file():
+        raise FileNotFoundError(f"Audio file not found: '{audio_path}'")
+
+    try:
+        return sf.read(str(audio_path))
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read audio file '{audio_path}': {exc}") from exc
 
 
 def parse_trial_line(line):
@@ -121,7 +133,7 @@ class TrainDataset(Dataset):
 
     def __getitem__(self, index):
         key = self.list_IDs[index]
-        X, _ = sf.read(str(self.base_dir / f"{key}.flac"))
+        X, _ = read_audio_file(self.base_dir / f"{key}.flac")
         if self.add_noise:
             if 0.5 > random.random():
                 if random.randint(0, 1) == 0:
@@ -148,7 +160,7 @@ class TestDataset(Dataset):
 
     def __getitem__(self, index):
         key = self.list_IDs[index]
-        X, _ = sf.read(str(self.base_dir / f"{key}.flac"))
+        X, _ = read_audio_file(self.base_dir / f"{key}.flac")
         X_pad = pad(X, self.cut)
         x_inp = Tensor(X_pad)
         return x_inp, key
@@ -167,7 +179,7 @@ class LabeledEvalDataset(Dataset):
     def __getitem__(self, index):
         record = self.trial_records[index]
         key = record["utterance_id"]
-        X, _ = sf.read(str(self.base_dir / f"{key}.flac"))
+        X, _ = read_audio_file(self.base_dir / f"{key}.flac")
         X_pad = pad(X, self.cut)
         x_inp = Tensor(X_pad)
 
