@@ -332,8 +332,13 @@ class WavLM(nn.Module):
     ):
 
 
-        with torch.no_grad():
+        # Keep the default no-grad fast path for inference, but allow callers
+        # such as FGSM generation to backpropagate to the input waveform.
+        if torch.is_grad_enabled():
             features = self.feature_extractor(source)
+        else:
+            with torch.no_grad():
+                features = self.feature_extractor(source)
 
         cnn_outs = features
         features = features[-1].transpose(1, 2)
