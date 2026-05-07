@@ -115,6 +115,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Optionally save FGSM-perturbed waveforms as .wav files under the run output directory.",
     )
+    parser.add_argument(
+        "--metrics-only",
+        action="store_true",
+        help="Compute and print metrics without requiring score, metric, or summary artifact writes.",
+    )
     return parser.parse_args()
 
 
@@ -140,18 +145,25 @@ def main() -> None:
             clean_score_filename=args.clean_score_filename,
             adv_score_filename=args.adv_score_filename,
             save_adv_audio=args.save_adv_audio,
+            metrics_only=args.metrics_only,
         )
         print(f"Scored split: {result['split']}")
         print(f"Checkpoint: {result['weights_path']}")
         print(f"Trial file: {result['trial_path']}")
-        print(f"Clean scores: {result['clean_score_path']}")
-        print(f"Adversarial scores: {result['adv_score_path']}")
-        print(f"Clean metrics: {result['clean_metrics_path']}")
-        print(f"Adversarial metrics: {result['adv_metrics_path']}")
+        if result["clean_score_path"] is not None:
+            print(f"Clean scores: {result['clean_score_path']}")
+        if result["adv_score_path"] is not None:
+            print(f"Adversarial scores: {result['adv_score_path']}")
+        if result["clean_metrics_path"] is not None:
+            print(f"Clean metrics: {result['clean_metrics_path']}")
+        if result["adv_metrics_path"] is not None:
+            print(f"Adversarial metrics: {result['adv_metrics_path']}")
         if result["adv_audio_dir"] is not None:
             print(f"Adversarial audio: {result['adv_audio_dir']}")
-        print(f"Summary JSON: {result['summary_json_path']}")
-        print(f"Summary TXT: {result['summary_text_path']}")
+        if result["summary_json_path"] is not None:
+            print(f"Summary JSON: {result['summary_json_path']}")
+        if result["summary_text_path"] is not None:
+            print(f"Summary TXT: {result['summary_text_path']}")
         print(f"Utterances scored: {result['utterance_count']}")
         print(
             "Clean metrics: "
@@ -174,6 +186,8 @@ def main() -> None:
                 f"mean_abs={result['attack_stats']['mean_abs_perturbation']:.6f}, "
                 f"mean_l2={result['attack_stats']['mean_l2_perturbation']:.6f}"
             )
+        for warning in result["artifact_warnings"]:
+            print(f"Artifact warning: {warning}")
         return
 
     result = run_clean_evaluation(
@@ -188,17 +202,22 @@ def main() -> None:
         ssl_pretrained_path=args.ssl_pretrained_path,
         batch_size=args.batch_size,
         score_filename=args.score_filename,
+        metrics_only=args.metrics_only,
     )
     print(f"Scored split: {result['split']}")
     print(f"Checkpoint: {result['weights_path']}")
-    print(f"Score file: {result['score_path']}")
-    print(f"Metric file: {result['metrics_path']}")
+    if result["score_path"] is not None:
+        print(f"Score file: {result['score_path']}")
+    if result["metrics_path"] is not None:
+        print(f"Metric file: {result['metrics_path']}")
     print(
         "Metrics: "
         f"minDCF={result['min_dcf']:.6f}, "
         f"EER={result['eer'] * 100:.6f}%, "
         f"CLLR={result['cllr'] * 100:.6f}%"
     )
+    for warning in result["artifact_warnings"]:
+        print(f"Artifact warning: {warning}")
 
 
 if __name__ == "__main__":

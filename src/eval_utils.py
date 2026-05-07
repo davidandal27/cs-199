@@ -261,20 +261,81 @@ def _write_ordered_score_lines(
             "Trial record, utterance, and score counts must match for score writing."
         )
 
-    lines = []
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(save_path, "w") as score_file:
+        for record, utt_id, score in zip(trial_records, utterance_ids, scores):
+            if record["utterance_id"] != utt_id:
+                raise ValueError(
+                    "Utterance ordering mismatch while writing scores: "
+                    f"expected '{record['utterance_id']}', got '{utt_id}'."
+                )
+            score_file.write(
+                f"{record['speaker_id']} {record['utterance_id']} {score} {record['label_name']}\n"
+            )
+
+
+def compute_cm_metrics_from_trial_records(
+    trial_records,
+    utterance_ids: List[str],
+    scores: List[float],
+) -> Dict[str, float]:
+    import numpy as np
+
+    from eval.calculate_modules import calculate_CLLR, compute_eer, compute_mindcf
+
+    if len(trial_records) != len(utterance_ids) or len(utterance_ids) != len(scores):
+        raise ValueError(
+            "Trial record, utterance, and score counts must match for metric computation."
+        )
+
+    ordered_labels = []
+    ordered_scores = []
     for record, utt_id, score in zip(trial_records, utterance_ids, scores):
         if record["utterance_id"] != utt_id:
             raise ValueError(
-                "Utterance ordering mismatch while writing scores: "
+                "Utterance ordering mismatch while computing metrics: "
                 f"expected '{record['utterance_id']}', got '{utt_id}'."
             )
-        lines.append(
-            f"{record['speaker_id']} {record['utterance_id']} {score} {record['label_name']}"
+        ordered_labels.append(record["label_name"])
+        ordered_scores.append(score)
+
+    cm_scores = np.asarray(ordered_scores, dtype=np.float64)
+    cm_labels = np.asarray(ordered_labels, dtype=str)
+    bona_cm = cm_scores[cm_labels == "bonafide"]
+    spoof_cm = cm_scores[cm_labels == "spoof"]
+
+    if bona_cm.size == 0 or spoof_cm.size == 0:
+        raise ValueError(
+            "Metric computation requires both bonafide and spoof trials in the score set."
         )
 
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(save_path, "w") as score_file:
-        score_file.write("\n".join(lines) + "\n")
+    p_spoof = 0.05
+    eer, frr, far, thresholds = compute_eer(bona_cm, spoof_cm)
+    cllr = calculate_CLLR(bona_cm, spoof_cm)
+    min_dcf, _ = compute_mindcf(
+        frr=frr,
+        far=far,
+        thresholds=thresholds,
+        Pspoof=p_spoof,
+        Cmiss=1,
+        Cfa=10,
+    )
+    return {"min_dcf": min_dcf, "eer": eer, "cllr": cllr}
+
+
+def _try_write_artifact(
+    action,
+    description: str,
+    artifact_warnings: List[str],
+) -> bool:
+    try:
+        action()
+        return True
+    except OSError as exc:
+        message = f"Unable to write {description}: {exc}"
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+        artifact_warnings.append(message)
+        return False
 
 
 def write_score_file(
@@ -301,15 +362,12 @@ def write_score_file(
         utterance_ids.extend(batch_utt_ids)
         scores.extend(batch_scores.tolist())
 
-    lines = []
-    for utt_id, score, trial_line in zip(utterance_ids, scores, trial_lines):
-        spk_id, trial_utt_id, _, _, _, _, _, _, key, _ = trial_line.strip().split(" ")
-        assert utt_id == trial_utt_id
-        lines.append(f"{spk_id} {trial_utt_id} {score} {key}")
-
     save_path.parent.mkdir(parents=True, exist_ok=True)
     with open(save_path, "w") as score_file:
-        score_file.write("\n".join(lines) + "\n")
+        for utt_id, score, trial_line in zip(utterance_ids, scores, trial_lines):
+            spk_id, trial_utt_id, _, _, _, _, _, _, key, _ = trial_line.strip().split(" ")
+            assert utt_id == trial_utt_id
+            score_file.write(f"{spk_id} {trial_utt_id} {score} {key}\n")
 
 
 def write_metric_report(
@@ -460,6 +518,7 @@ def run_clean_evaluation(
     ssl_pretrained_path: Optional[str] = None,
     batch_size: Optional[int] = None,
     score_filename: Optional[str] = None,
+    metrics_only: bool = False,
 ) -> Dict[str, Any]:
     config = load_eval_config(
         config_path=config_path,
@@ -496,7 +555,7 @@ def run_clean_evaluation(
     model.load_state_dict(torch.load(paths.model_weights_path, map_location=device))
 
     effective_batch_size = batch_size or config["batch_size"]
-    eval_loader, trial_path = build_eval_loader(
+    eval_loader, trial_path, trial_records = build_labeled_eval_loader(
         paths=paths,
         batch_size=effective_batch_size,
         split=split,
@@ -505,27 +564,57 @@ def run_clean_evaluation(
     run_dir = paths.output_dir / config["model_tag"] / f"{split}_clean_eval"
     score_path = run_dir / (score_filename or f"{split}_scores.txt")
     metrics_path = run_dir / f"{split}_metrics.txt"
+    artifact_warnings: List[str] = []
 
-    write_score_file(
+    utterance_ids, scores, _ = _collect_scores(
         data_loader=eval_loader,
         model=model,
         device=device,
-        save_path=score_path,
-        trial_path=trial_path,
     )
-    metrics = compute_cm_metrics(score_path=score_path, metrics_path=metrics_path)
+    metrics = compute_cm_metrics_from_trial_records(
+        trial_records=trial_records,
+        utterance_ids=utterance_ids,
+        scores=scores,
+    )
+
+    persisted_score_path = None
+    persisted_metrics_path = None
+    if not metrics_only:
+        if _try_write_artifact(
+            action=lambda: _write_ordered_score_lines(
+                save_path=score_path,
+                trial_records=trial_records,
+                utterance_ids=utterance_ids,
+                scores=scores,
+            ),
+            description=f"clean score file '{score_path}'",
+            artifact_warnings=artifact_warnings,
+        ):
+            persisted_score_path = score_path
+        if _try_write_artifact(
+            action=lambda: write_metric_report(
+                metrics_path=metrics_path,
+                min_dcf=metrics["min_dcf"],
+                eer=metrics["eer"],
+                cllr=metrics["cllr"],
+            ),
+            description=f"clean metric report '{metrics_path}'",
+            artifact_warnings=artifact_warnings,
+        ):
+            persisted_metrics_path = metrics_path
 
     return {
         "split": split,
         "device": str(device),
-        "score_path": score_path,
-        "metrics_path": metrics_path,
+        "score_path": persisted_score_path,
+        "metrics_path": persisted_metrics_path,
         "weights_path": paths.model_weights_path,
         "trial_path": trial_path,
         "batch_size": effective_batch_size,
         "min_dcf": metrics["min_dcf"],
         "eer": metrics["eer"],
         "cllr": metrics["cllr"],
+        "artifact_warnings": artifact_warnings,
     }
 
 
@@ -546,6 +635,7 @@ def run_fgsm_scoring_pipeline(
     clean_score_filename: str = "clean_scores.txt",
     adv_score_filename: Optional[str] = None,
     save_adv_audio: bool = False,
+    metrics_only: bool = False,
 ) -> Dict[str, Any]:
     config = load_eval_config(
         config_path=config_path,
@@ -599,14 +689,22 @@ def run_fgsm_scoring_pipeline(
     summary_json_path = run_dir / "fgsm_metrics_summary.json"
     summary_text_path = run_dir / "fgsm_metrics_summary.txt"
     adv_audio_dir = run_dir / f"fgsm_eps_{epsilon_tag}_audio" if save_adv_audio else None
+    artifact_warnings: List[str] = []
+
+    if metrics_only and save_adv_audio:
+        message = (
+            "Ignoring save_adv_audio because metrics_only=True disables run artifacts."
+        )
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+        artifact_warnings.append(message)
+        adv_audio_dir = None
 
     clean_utterance_ids, clean_scores, _ = _collect_scores(
         data_loader=eval_loader,
         model=model,
         device=device,
     )
-    _write_ordered_score_lines(
-        save_path=clean_score_path,
+    clean_metrics = compute_cm_metrics_from_trial_records(
         trial_records=trial_records,
         utterance_ids=clean_utterance_ids,
         scores=clean_scores,
@@ -622,21 +720,15 @@ def run_fgsm_scoring_pipeline(
         clamp_max=clamp_max,
         adversarial_audio_dir=adv_audio_dir,
     )
-    _write_ordered_score_lines(
-        save_path=adv_score_path,
-        trial_records=trial_records,
-        utterance_ids=adv_utterance_ids,
-        scores=adv_scores,
-    )
 
     if clean_utterance_ids != adv_utterance_ids:
         raise ValueError("Clean and adversarial scoring produced different utterance orders.")
 
-    compute_cm_metrics(score_path=clean_score_path, metrics_path=clean_metrics_path)
-    compute_cm_metrics(score_path=adv_score_path, metrics_path=adv_metrics_path)
-
-    clean_metrics = read_metric_report(clean_metrics_path)
-    adv_metrics = read_metric_report(adv_metrics_path)
+    adv_metrics = compute_cm_metrics_from_trial_records(
+        trial_records=trial_records,
+        utterance_ids=adv_utterance_ids,
+        scores=adv_scores,
+    )
     metric_summary = build_metric_delta_summary(clean_metrics, adv_metrics)
     summary = {
         "split": split,
@@ -659,8 +751,79 @@ def run_fgsm_scoring_pipeline(
         "metrics": metric_summary,
         "attack_stats": _average_attack_stats(attack_stats),
     }
-    write_metric_summary_json(summary_json_path, summary)
-    write_metric_summary_text(summary_text_path, summary)
+
+    persisted_clean_score_path = None
+    persisted_adv_score_path = None
+    persisted_clean_metrics_path = None
+    persisted_adv_metrics_path = None
+    persisted_summary_json_path = None
+    persisted_summary_text_path = None
+    persisted_adv_audio_dir = adv_audio_dir
+
+    if not metrics_only:
+        if _try_write_artifact(
+            action=lambda: _write_ordered_score_lines(
+                save_path=clean_score_path,
+                trial_records=trial_records,
+                utterance_ids=clean_utterance_ids,
+                scores=clean_scores,
+            ),
+            description=f"clean score file '{clean_score_path}'",
+            artifact_warnings=artifact_warnings,
+        ):
+            persisted_clean_score_path = clean_score_path
+
+        if _try_write_artifact(
+            action=lambda: _write_ordered_score_lines(
+                save_path=adv_score_path,
+                trial_records=trial_records,
+                utterance_ids=adv_utterance_ids,
+                scores=adv_scores,
+            ),
+            description=f"adversarial score file '{adv_score_path}'",
+            artifact_warnings=artifact_warnings,
+        ):
+            persisted_adv_score_path = adv_score_path
+
+        if _try_write_artifact(
+            action=lambda: write_metric_report(
+                metrics_path=clean_metrics_path,
+                min_dcf=clean_metrics["min_dcf"],
+                eer=clean_metrics["eer"],
+                cllr=clean_metrics["cllr"],
+            ),
+            description=f"clean metric report '{clean_metrics_path}'",
+            artifact_warnings=artifact_warnings,
+        ):
+            persisted_clean_metrics_path = clean_metrics_path
+
+        if _try_write_artifact(
+            action=lambda: write_metric_report(
+                metrics_path=adv_metrics_path,
+                min_dcf=adv_metrics["min_dcf"],
+                eer=adv_metrics["eer"],
+                cllr=adv_metrics["cllr"],
+            ),
+            description=f"adversarial metric report '{adv_metrics_path}'",
+            artifact_warnings=artifact_warnings,
+        ):
+            persisted_adv_metrics_path = adv_metrics_path
+
+        if _try_write_artifact(
+            action=lambda: write_metric_summary_json(summary_json_path, summary),
+            description=f"FGSM summary JSON '{summary_json_path}'",
+            artifact_warnings=artifact_warnings,
+        ):
+            persisted_summary_json_path = summary_json_path
+
+        if _try_write_artifact(
+            action=lambda: write_metric_summary_text(summary_text_path, summary),
+            description=f"FGSM summary text '{summary_text_path}'",
+            artifact_warnings=artifact_warnings,
+        ):
+            persisted_summary_text_path = summary_text_path
+    else:
+        persisted_adv_audio_dir = None
 
     return {
         "split": split,
@@ -671,14 +834,15 @@ def run_fgsm_scoring_pipeline(
         "epsilon": epsilon,
         "clamp_min": clamp_min,
         "clamp_max": clamp_max,
-        "clean_score_path": clean_score_path,
-        "adv_score_path": adv_score_path,
-        "clean_metrics_path": clean_metrics_path,
-        "adv_metrics_path": adv_metrics_path,
-        "adv_audio_dir": adv_audio_dir,
-        "summary_json_path": summary_json_path,
-        "summary_text_path": summary_text_path,
+        "clean_score_path": persisted_clean_score_path,
+        "adv_score_path": persisted_adv_score_path,
+        "clean_metrics_path": persisted_clean_metrics_path,
+        "adv_metrics_path": persisted_adv_metrics_path,
+        "adv_audio_dir": persisted_adv_audio_dir,
+        "summary_json_path": persisted_summary_json_path,
+        "summary_text_path": persisted_summary_text_path,
         "utterance_count": len(clean_utterance_ids),
         "attack_stats": summary["attack_stats"],
         "metrics": metric_summary,
+        "artifact_warnings": artifact_warnings,
     }
