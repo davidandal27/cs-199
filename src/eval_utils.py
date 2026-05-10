@@ -180,6 +180,11 @@ def generate_adversarial_batch(
         return_stats=return_stats,
     )
 
+def preprocess_audio(wav):
+    import torch
+    wav = wav / (wav.abs().max(dim=-1, keepdim=True)[0] + 1e-8)
+    wav = torch.clamp(wav, -1.0, 1.0)
+    return wav
 
 def generate_pgd_adversarial_batch(
     model,
@@ -270,6 +275,9 @@ def _collect_scores(
             else:
                 raise ValueError(f"Unsupported attack_name '{attack_name}'.")
             attack_stats.append(batch_stats)
+
+        # INPUT PREPROCESS DEFENSE
+        batch_x = preprocess_audio(batch_x)
 
         with torch.no_grad():
             batch_out = model(batch_x)
