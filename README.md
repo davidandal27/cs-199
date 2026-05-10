@@ -28,12 +28,12 @@ Before running the experiment, replace the data directory of `database_path` in 
 
 To train & evaluate the model:
 ```
-python ./main.py --config ./config/WavLM_Nes2Net_ASVspoof5.conf
+python -m training.main --config ./config/WavLM_Nes2Net_ASVspoof5.conf
 ```
 
 To run clean eval-only scoring from a pretrained checkpoint:
 ```bash
-python ./eval_fgsm.py \
+python -m attacks.eval_fgsm \
   --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
   --weights /path/to/checkpoint.pth \
   --output-dir /path/to/output \
@@ -48,7 +48,7 @@ This eval-only path is intended for Colab and Google Drive backed assets, and it
 
 To run matched clean and FGSM scoring from the same ordered trial list:
 ```bash
-python ./eval_fgsm.py \
+python -m attacks.eval_fgsm \
   --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
   --weights /path/to/checkpoint.pth \
   --output-dir /path/to/output \
@@ -78,7 +78,7 @@ The repository includes [`notebooks/fgsm_eval_colab.ipynb`](notebooks/fgsm_eval_
 
 Minimal Colab CLI example with explicit Drive-backed paths:
 ```bash
-python ./eval_fgsm.py \
+python -m attacks.eval_fgsm \
   --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
   --weights "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/checkpoints/model.pth" \
   --output-dir "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/outputs" \
@@ -90,7 +90,8 @@ python ./eval_fgsm.py \
 ```
 
 ## Repository Layout
-- `main.py`: training and evaluation entrypoint
+- `training/`: training and evaluation entrypoints
+- `attacks/`: adversarial attack and attack-evaluation entrypoints
 - `src/`: helper modules for datasets, augmentation, path resolution, and training utilities
 - `models/`: model architecture definitions
 - `eval/`: evaluation metric helpers
