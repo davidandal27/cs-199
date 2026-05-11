@@ -1,0 +1,46 @@
+{
+  "split": "eval",
+  "architecture": "wavlm_nes2net",
+  "checkpoint_path": "/Users/dundale/Downloads/repos-acads/cs-199/test_items/checkpoint.pth",
+  "dataset_root": "/Users/dundale/Downloads/repos-acads/cs-199/test_items",
+  "trial_file": "/Users/dundale/Downloads/repos-acads/cs-199/test_items/ASVspoof5.eval.local_2.tsv",
+  "output_dir": "/Users/dundale/Downloads/repos-acads/cs-199/output/WavLM_Nes2Net_ASVspoof5_fulldev_estop5_bs64/eval_pgd_eval",
+  "device": "cpu",
+  "batch_size": 2,
+  "clean_score_path": null,
+  "adv_score_path": "/Users/dundale/Downloads/repos-acads/cs-199/output/WavLM_Nes2Net_ASVspoof5_fulldev_estop5_bs64/eval_pgd_eval/pgd_eps_0p001_steps_5_scores.txt",
+  "clean_metrics_path": null,
+  "adv_metrics_path": "/Users/dundale/Downloads/repos-acads/cs-199/output/WavLM_Nes2Net_ASVspoof5_fulldev_estop5_bs64/eval_pgd_eval/pgd_eps_0p001_steps_5_metrics.txt",
+  "adv_audio_dir": null,
+  "attack_name": "pgd",
+  "attack_type": "untargeted_linf",
+  "epsilon": 0.001,
+  "steps": 5,
+  "alpha": 0.0002,
+  "random_start": false,
+  "clamp_min": -1.0,
+  "clamp_max": 1.0,
+  "save_adv_audio": false,
+  "utterance_count": 2,
+  "metrics": {
+    "min_dcf": {
+      "adversarial": 1.0
+    },
+    "eer": {
+      "adversarial": 1.0
+    },
+    "cllr": {
+      "adversarial": 5.002024078571764
+    }
+  },
+  "attack_stats": {
+    "loss": 5.8150835037231445,
+    "max_abs_perturbation": 0.0010000020265579224,
+    "mean_abs_perturbation": 0.0005039082025177777,
+    "mean_l2_perturbation": 0.15128320455551147,
+    "epsilon": 0.001,
+    "steps": 5.0,
+    "alpha": 0.0002
+  },
+  "clean_pass_skipped": true
+}
