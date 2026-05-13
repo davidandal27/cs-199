@@ -15,6 +15,7 @@ from importlib import import_module
 from pathlib import Path
 from shutil import copy
 from typing import Dict, List, Union
+from src.defense_utils import defend_audio
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -279,38 +280,65 @@ def train_epoch(
     device: torch.device,
     scheduler: torch.optim.lr_scheduler,
     config: argparse.Namespace):
-    """Train the model for one epoch"""
+
+    from src.defense_utils import defend_audio
+    import torch.nn as nn
+
     running_loss = 0
     num_total = 0.0
     ii = 0
     model.train()
 
-    # set objective (Loss) functions
+    # Loss function
     weight = torch.FloatTensor([0.1, 0.9]).to(device)
     criterion = nn.CrossEntropyLoss(weight=weight)
+
+    # Read defense parameters from config
+    defense_config = config.get("defense", {})
+    sigma = defense_config.get("sigma", 0.005)
+    normalize = defense_config.get("normalize", True)
+    clamp = defense_config.get("clamp", True)
+
+
     for batch_x, batch_y in tqdm(trn_loader):
         batch_size = batch_x.size(0)
         num_total += batch_size
         ii += 1
+
+        # Move to GPU
         batch_x = batch_x.to(device)
         batch_y = batch_y.view(-1).type(torch.int64).to(device)
+
+
+        batch_x = defend_audio(
+            batch_x,
+            sigma=sigma,
+            normalize=normalize,
+            clamp=clamp,
+        )
+
+        # Forward pass
         batch_out = model(batch_x)
+
+        # Compute loss
         batch_loss = criterion(batch_out, batch_y)
+
+        # Backpropagation
         running_loss += batch_loss.item() * batch_size
         optim.zero_grad()
         batch_loss.backward()
         optim.step()
 
+        # Learning rate scheduler
         if config["optim_config"]["scheduler"] in ["cosine", "keras_decay"]:
             scheduler.step()
         elif scheduler is None:
             pass
         else:
-            raise ValueError("scheduler error, got:{}".format(scheduler))
+            raise ValueError(f"scheduler error, got:{scheduler}")
 
     running_loss /= num_total
     return running_loss
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ASVspoof detection system")
