@@ -61,8 +61,8 @@ def main(args: argparse.Namespace) -> None:
 
     # define database related paths
     output_dir = workflow_paths.output_dir
-    database_path = workflow_paths.dataset_root
-    metadata_path = workflow_paths.metadata_root
+    database_path = Path(config["database_path"])
+    metadata_path = Path(config["metadata_path"])   
     dev_trial_path = workflow_paths.dev_metadata
     # define model related paths
     model_tag = config["model_tag"]
