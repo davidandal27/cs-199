@@ -31,11 +31,16 @@ To train & evaluate the model:
 python -m training.main --config ./config/WavLM_Nes2Net_ASVspoof5.conf
 ```
 
+This automatically picks the last .pth file generated
+```
+CHECKPOINT=$(find ./outputs/WavLM_Nes2Net/checkpoints/ -name "*.pth" -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d" ")
+```
+
 To run clean eval-only scoring from a pretrained checkpoint:
 ```bash
 python -m attacks.eval_fgsm \
   --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
-  --weights /path/to/checkpoint.pth \
+  --weights "$CHECKPOINT" \
   --output-dir /path/to/output \
   --dataset-root /path/to/data \
   --audio-root /path/to/eval_audio \
@@ -50,7 +55,7 @@ To run matched clean and FGSM scoring from the same ordered trial list:
 ```bash
 python -m attacks.eval_fgsm \
   --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
-  --weights /path/to/checkpoint.pth \
+  --weights "$CHECKPOINT" \
   --output-dir /path/to/output \
   --dataset-root /path/to/data \
   --audio-root /path/to/eval_audio \
