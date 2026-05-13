@@ -187,7 +187,7 @@ def get_loader(
 
     trn_database_path = database_path / "flac_T/"
     dev_database_path = database_path / "flac_D/"
-    eval_database_path = database_path / "eval_full/flac_E_eval/"
+    eval_database_path = database_path / "flac_E/"
 
     trn_list_path = (metadata_path /
                      "ASVspoof5.train.tsv")
