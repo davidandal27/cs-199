@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.path_utils import apply_path_overrides, resolve_workflow_paths
+from src.defense_utils import defend_audio
 
 
 def resolve_eval_device():
@@ -271,6 +272,8 @@ def _collect_scores(
                 raise ValueError(f"Unsupported attack_name '{attack_name}'.")
             attack_stats.append(batch_stats)
 
+        batch_x = defend_audio(batch_x)
+        
         with torch.no_grad():
             batch_out = model(batch_x)
             batch_scores = batch_out[:, 1].data.cpu().numpy().ravel()
