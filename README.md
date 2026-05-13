@@ -33,7 +33,7 @@ python -m training.main --config ./config/WavLM_Nes2Net_ASVspoof5.conf
 
 This automatically picks the last .pth file generated
 ```
-CHECKPOINT=$(find ./outputs/WavLM_Nes2Net/checkpoints/ -name "*.pth" -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d" ")
+CHECKPOINT=$(ls -t ./outputs/WavLM_Nes2Net/checkpoints/*.pth | head -1)
 ```
 
 To run clean eval-only scoring from a pretrained checkpoint:
