@@ -66,6 +66,13 @@ def parse_args() -> argparse.Namespace:
         help="Optional WavLM checkpoint override.",
     )
     parser.add_argument(
+        "--defense-config",
+        "--defense_config",
+        dest="defense_config",
+        default=None,
+        help="Optional shared defense config JSON override.",
+    )
+    parser.add_argument(
         "--batch-size",
         "--batch_size",
         dest="batch_size",
@@ -126,6 +133,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Compute and print metrics without requiring score, metric, or summary artifact writes.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=1234,
+        help="Random seed for reproducible stochastic defense evaluation.",
+    )
     return parser.parse_args()
 
 
@@ -144,6 +157,7 @@ def main() -> None:
             trial_file=args.trial_file,
             audio_root=args.audio_root,
             ssl_pretrained_path=args.ssl_pretrained_path,
+            defense_config_path=args.defense_config,
             batch_size=args.batch_size,
             epsilon=args.epsilon,
             clamp_min=args.clamp_min,
@@ -152,6 +166,7 @@ def main() -> None:
             adv_score_filename=args.adv_score_filename,
             save_adv_audio=args.save_adv_audio,
             metrics_only=args.metrics_only,
+            seed=args.seed,
         )
         print(f"Scored split: {result['split']}")
         print(f"Checkpoint: {result['weights_path']}")
@@ -206,9 +221,11 @@ def main() -> None:
         trial_file=args.trial_file,
         audio_root=args.audio_root,
         ssl_pretrained_path=args.ssl_pretrained_path,
+        defense_config_path=args.defense_config,
         batch_size=args.batch_size,
         score_filename=args.score_filename,
         metrics_only=args.metrics_only,
+        seed=args.seed,
     )
     print(f"Scored split: {result['split']}")
     print(f"Checkpoint: {result['weights_path']}")

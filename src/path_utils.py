@@ -30,8 +30,10 @@ def resolve_workflow_paths(
     require_training_assets: bool = True,
     require_dev_assets: bool = True,
     require_eval_assets: bool = True,
+    train_audio_root_override: Optional[str] = None,
     dev_audio_root_override: Optional[str] = None,
     eval_audio_root_override: Optional[str] = None,
+    train_metadata_override: Optional[str] = None,
     dev_metadata_override: Optional[str] = None,
     eval_metadata_override: Optional[str] = None,
 ) -> WorkflowPaths:
@@ -45,9 +47,13 @@ def resolve_workflow_paths(
         dataset_root=dataset_root,
         metadata_root=metadata_root,
         train_audio_root=(
-            _resolve_child_dir(dataset_root, "flac_T", "train audio root")
-            if require_training_assets
-            else None
+            _resolve_dir(train_audio_root_override, "train audio root")
+            if train_audio_root_override is not None
+            else (
+                _resolve_child_dir(dataset_root, "flac_T", "train audio root")
+                if require_training_assets
+                else None
+            )
         ),
         dev_audio_root=(
             _resolve_dir(dev_audio_root_override, "dev audio root")
@@ -72,13 +78,17 @@ def resolve_workflow_paths(
             )
         ),
         train_metadata=(
-            _resolve_child_file(
-                metadata_root,
-                "ASVspoof5.train.tsv",
-                "train metadata file",
+            _resolve_file(train_metadata_override, "train metadata file")
+            if train_metadata_override is not None
+            else (
+                _resolve_child_file(
+                    metadata_root,
+                    "ASVspoof5.train.tsv",
+                    "train metadata file",
+                )
+                if require_training_assets
+                else None
             )
-            if require_training_assets
-            else None
         ),
         dev_metadata=(
             _resolve_file(dev_metadata_override, "dev metadata file")
