@@ -5,7 +5,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.path_utils import apply_path_overrides, resolve_workflow_paths
-from src.defense_utils import defend_audio
+from src.defense_utils import (
+    apply_resolved_defense_config,
+    forward_with_defense,
+    get_defense_kwargs,
+    get_defense_samples,
+)
 
 
 def resolve_eval_device():
@@ -26,6 +31,7 @@ def load_eval_config(
     dataset_root: Optional[str] = None,
     metadata_root: Optional[str] = None,
     ssl_pretrained_path: Optional[str] = None,
+    defense_config_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     with open(config_path, "r") as file:
         config = json.load(file)
@@ -37,7 +43,11 @@ def load_eval_config(
     if ssl_pretrained_path is not None:
         config["model_config"]["ssl_pretrained_path"] = ssl_pretrained_path
 
-    return config
+    return apply_resolved_defense_config(
+        config=config,
+        config_path=config_path,
+        defense_config_path=defense_config_path,
+    )
 
 
 def apply_eval_path_fallbacks(
@@ -60,6 +70,7 @@ def build_eval_loader(
     split: str,
     trial_path: Optional[Path] = None,
 ):
+    import torch
     from torch.utils.data import DataLoader
     from src.data_utils import TestDataset, genSpoof_list
 
@@ -78,7 +89,7 @@ def build_eval_loader(
         batch_size=batch_size,
         shuffle=False,
         drop_last=False,
-        pin_memory=True,
+        pin_memory=torch.cuda.is_available(),
     )
     return data_loader, trial_path
 
@@ -91,6 +102,7 @@ def build_labeled_eval_loader(
     return_trial_line: bool = False,
 ):
     from torch.utils.data import DataLoader
+    import torch
     from src.data_utils import LabeledEvalDataset, load_trial_records
 
     default_trial_path, audio_root = resolve_split_paths(paths=paths, split=split)
@@ -112,7 +124,7 @@ def build_labeled_eval_loader(
         batch_size=batch_size,
         shuffle=False,
         drop_last=False,
-        pin_memory=True,
+        pin_memory=torch.cuda.is_available(),
     )
     return data_loader, trial_path, trial_records
 
@@ -195,6 +207,8 @@ def _collect_scores(
     epsilon: float = 0.0,
     clamp_min: Optional[float] = None,
     clamp_max: Optional[float] = None,
+    defense_kwargs: Optional[Dict[str, Any]] = None,
+    defense_samples: int = 1,
     adversarial_audio_dir: Optional[Path] = None,
 ):
     import torch
@@ -206,6 +220,7 @@ def _collect_scores(
     utterance_ids: List[str] = []
     scores: List[float] = []
     attack_stats: List[Dict[str, float]] = []
+    defense_kwargs = defense_kwargs or {}
 
     for batch_x, batch_y, batch_utt_ids in tqdm(data_loader):
         batch_x = batch_x.to(device)
@@ -223,10 +238,13 @@ def _collect_scores(
             )
             attack_stats.append(batch_stats)
 
-        batch_x = defend_audio(batch_x)
-        
         with torch.no_grad():
-            batch_out = model(batch_x)
+            batch_out, _ = forward_with_defense(
+                model=model,
+                wav=batch_x,
+                defense_kwargs=defense_kwargs,
+                defense_samples=defense_samples,
+            )
             batch_scores = batch_out[:, 1].data.cpu().numpy().ravel()
 
         if attack and adversarial_audio_dir is not None:
@@ -477,6 +495,7 @@ def write_metric_summary_text(summary_path: Path, summary: Dict[str, Any]) -> No
         summary_file.write(f"output_dir = {summary['output_dir']}\n")
         summary_file.write(f"device = {summary['device']}\n")
         summary_file.write(f"batch_size = {summary['batch_size']}\n")
+        summary_file.write(f"defense_samples = {summary['defense_samples']}\n")
         summary_file.write(f"epsilon = {summary['epsilon']}\n")
         summary_file.write(f"clamp_min = {summary['clamp_min']}\n")
         summary_file.write(f"clamp_max = {summary['clamp_max']}\n")
@@ -519,15 +538,18 @@ def run_clean_evaluation(
     trial_file: Optional[str] = None,
     audio_root: Optional[str] = None,
     ssl_pretrained_path: Optional[str] = None,
+    defense_config_path: Optional[str] = None,
     batch_size: Optional[int] = None,
     score_filename: Optional[str] = None,
     metrics_only: bool = False,
+    seed: int = 1234,
 ) -> Dict[str, Any]:
     config = load_eval_config(
         config_path=config_path,
         dataset_root=dataset_root,
         metadata_root=metadata_root,
         ssl_pretrained_path=ssl_pretrained_path,
+        defense_config_path=defense_config_path,
     )
     config = apply_eval_path_fallbacks(
         config=config,
@@ -551,8 +573,12 @@ def run_clean_evaluation(
         eval_metadata_override=trial_file if split == "eval" else None,
     )
     config = apply_path_overrides(config, paths)
+    from src.utils import set_seed
 
     device = resolve_eval_device()
+    set_seed(seed, config)
+    defense_kwargs = get_defense_kwargs(config)
+    defense_samples = get_defense_samples(config)
 
     model = build_model(config["model_config"], device)
     model.load_state_dict(torch.load(paths.model_weights_path, map_location=device))
@@ -573,6 +599,8 @@ def run_clean_evaluation(
         data_loader=eval_loader,
         model=model,
         device=device,
+        defense_kwargs=defense_kwargs,
+        defense_samples=defense_samples,
     )
     metrics = compute_cm_metrics_from_trial_records(
         trial_records=trial_records,
@@ -614,6 +642,7 @@ def run_clean_evaluation(
         "weights_path": paths.model_weights_path,
         "trial_path": trial_path,
         "batch_size": effective_batch_size,
+        "defense_samples": defense_samples,
         "min_dcf": metrics["min_dcf"],
         "eer": metrics["eer"],
         "cllr": metrics["cllr"],
@@ -631,6 +660,7 @@ def run_fgsm_scoring_pipeline(
     trial_file: Optional[str] = None,
     audio_root: Optional[str] = None,
     ssl_pretrained_path: Optional[str] = None,
+    defense_config_path: Optional[str] = None,
     batch_size: Optional[int] = None,
     epsilon: float = 0.001,
     clamp_min: Optional[float] = -1.0,
@@ -639,12 +669,14 @@ def run_fgsm_scoring_pipeline(
     adv_score_filename: Optional[str] = None,
     save_adv_audio: bool = False,
     metrics_only: bool = False,
+    seed: int = 1234,
 ) -> Dict[str, Any]:
     config = load_eval_config(
         config_path=config_path,
         dataset_root=dataset_root,
         metadata_root=metadata_root,
         ssl_pretrained_path=ssl_pretrained_path,
+        defense_config_path=defense_config_path,
     )
     config = apply_eval_path_fallbacks(
         config=config,
@@ -668,8 +700,12 @@ def run_fgsm_scoring_pipeline(
         eval_metadata_override=trial_file if split == "eval" else None,
     )
     config = apply_path_overrides(config, paths)
+    from src.utils import set_seed
 
     device = resolve_eval_device()
+    set_seed(seed, config)
+    defense_kwargs = get_defense_kwargs(config)
+    defense_samples = get_defense_samples(config)
 
     model = build_model(config["model_config"], device)
     model.load_state_dict(torch.load(paths.model_weights_path, map_location=device))
@@ -706,6 +742,8 @@ def run_fgsm_scoring_pipeline(
         data_loader=eval_loader,
         model=model,
         device=device,
+        defense_kwargs=defense_kwargs,
+        defense_samples=defense_samples,
     )
     clean_metrics = compute_cm_metrics_from_trial_records(
         trial_records=trial_records,
@@ -721,6 +759,8 @@ def run_fgsm_scoring_pipeline(
         epsilon=epsilon,
         clamp_min=clamp_min,
         clamp_max=clamp_max,
+        defense_kwargs=defense_kwargs,
+        defense_samples=defense_samples,
         adversarial_audio_dir=adv_audio_dir,
     )
 
@@ -742,6 +782,7 @@ def run_fgsm_scoring_pipeline(
         "output_dir": str(run_dir),
         "device": str(device),
         "batch_size": effective_batch_size,
+        "defense_samples": defense_samples,
         "epsilon": epsilon,
         "clamp_min": clamp_min,
         "clamp_max": clamp_max,
@@ -834,6 +875,7 @@ def run_fgsm_scoring_pipeline(
         "weights_path": paths.model_weights_path,
         "trial_path": trial_path,
         "batch_size": effective_batch_size,
+        "defense_samples": defense_samples,
         "epsilon": epsilon,
         "clamp_min": clamp_min,
         "clamp_max": clamp_max,

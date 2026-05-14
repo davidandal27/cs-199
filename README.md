@@ -28,7 +28,9 @@ Before running the experiment, replace the data directory of `database_path` in 
 
 To train & evaluate the model:
 ```
-python -m training.main --config ./config/WavLM_Nes2Net_ASVspoof5.conf
+python -m training.main \
+  --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
+  --defense-config ./config/defense.conf
 ```
 
 This automatically picks the last .pth file generated
@@ -40,6 +42,7 @@ To run clean eval-only scoring from a pretrained checkpoint:
 ```bash
 python -m attacks.eval_fgsm \
   --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
+  --defense-config ./config/defense.conf \
   --weights "$CHECKPOINT" \
   --output-dir /path/to/output \
   --dataset-root /path/to/data \
@@ -55,6 +58,7 @@ To run matched clean and FGSM scoring from the same ordered trial list:
 ```bash
 python -m attacks.eval_fgsm \
   --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
+  --defense-config ./config/defense.conf \
   --weights "$CHECKPOINT" \
   --output-dir /path/to/output \
   --dataset-root /path/to/data \
@@ -85,6 +89,7 @@ Minimal Colab CLI example with explicit Drive-backed paths:
 ```bash
 python -m attacks.eval_fgsm \
   --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
+  --defense-config ./config/defense.conf \
   --weights "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/checkpoints/model.pth" \
   --output-dir "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/outputs" \
   --dataset-root "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/data" \

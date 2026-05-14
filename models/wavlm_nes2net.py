@@ -161,7 +161,7 @@ class SSLModel(nn.Module):
     def __init__(self, device, ssl_pretrained_path):
         super(SSLModel, self).__init__()
 
-        checkpoint = torch.load(ssl_pretrained_path)
+        checkpoint = torch.load(ssl_pretrained_path, map_location=device)
         cfg = WavLMConfig(checkpoint['cfg'])
         self.model = WavLM(cfg)
         self.loadParameters(checkpoint['model'])

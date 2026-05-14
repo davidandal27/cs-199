@@ -29,7 +29,7 @@ def read_audio_file(audio_path):
 
 
 def parse_trial_line(line):
-    fields = line.strip().split(" ")
+    fields = line.strip().split()
     if len(fields) != 10:
         raise ValueError(f"Expected 10 fields in trial line, got {len(fields)}: {line.strip()}")
 
@@ -92,7 +92,9 @@ def pad_random(x: np.ndarray, max_len: int = 64600):
     x_len = x.shape[0]
     # if duration is already long enough
     if x_len >= max_len:
-        stt = np.random.randint(x_len - max_len)
+        if x_len == max_len:
+            return x
+        stt = np.random.randint(0, x_len - max_len + 1)
         return x[stt:stt + max_len]
 
     # if too short
