@@ -328,7 +328,7 @@ class WavLM(nn.Module):
         newmask: Optional[torch.Tensor] = None,
         ret_conv: bool = False,
         output_layer: Optional[int] = None,
-        ret_layer_results: bool = False,
+        ret_layer_results: bool = True,
     ):
 
 
@@ -370,7 +370,8 @@ class WavLM(nn.Module):
         x, layer_results = self.encoder(
             x,
             padding_mask=padding_mask,
-            layer=None if output_layer is None else output_layer - 1
+            layer=None if output_layer is None else output_layer - 1,
+            ret_layer_results=ret_layer_results,
         )
         return x, layer_results
         # res = {"x": x, "padding_mask": padding_mask, "features": features, "layer_results": layer_results}
@@ -569,15 +570,35 @@ class TransformerEncoder(nn.Module):
 
         self.apply(init_bert_params)
 
-    def forward(self, x, padding_mask=None, streaming_mask=None, layer=None):
-        x, layer_results = self.extract_features(x, padding_mask, streaming_mask, layer)
+    def forward(
+        self,
+        x,
+        padding_mask=None,
+        streaming_mask=None,
+        layer=None,
+        ret_layer_results=True,
+    ):
+        x, layer_results = self.extract_features(
+            x,
+            padding_mask,
+            streaming_mask,
+            layer,
+            ret_layer_results=ret_layer_results,
+        )
 
         if self.layer_norm_first and layer is None:
             x = self.layer_norm(x)
 
         return x, layer_results
 
-    def extract_features(self, x, padding_mask=None, streaming_mask=None, tgt_layer=None):
+    def extract_features(
+        self,
+        x,
+        padding_mask=None,
+        streaming_mask=None,
+        tgt_layer=None,
+        ret_layer_results=True,
+    ):
 
         if padding_mask is not None:
             x[padding_mask] = 0
@@ -594,9 +615,9 @@ class TransformerEncoder(nn.Module):
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
 
-        layer_results = []
+        layer_results = [] if ret_layer_results else None
         z = None
-        if tgt_layer is not None:
+        if ret_layer_results and tgt_layer is not None:
             layer_results.append((x, z))
         r = None
         pos_bias = None
@@ -605,7 +626,7 @@ class TransformerEncoder(nn.Module):
             if not self.training or (dropout_probability > self.layerdrop):
                 x, z, pos_bias = layer(x, self_attn_padding_mask=padding_mask, need_weights=False,
                                        self_attn_mask=streaming_mask, pos_bias=pos_bias)
-            if tgt_layer is not None:
+            if ret_layer_results and tgt_layer is not None:
                 layer_results.append((x, z))
             if i == tgt_layer:
                 r = x
