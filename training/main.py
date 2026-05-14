@@ -468,6 +468,97 @@ def get_model(model_config: Dict, device: torch.device):
     return model
 
 
+def _coerce_loader_bool(value: Any, option_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return str_to_bool(value)
+    raise ValueError(
+        f"Loader option '{option_name}' must be a boolean or boolean-like string."
+    )
+
+
+def _coerce_loader_int(
+    value: Any,
+    option_name: str,
+    *,
+    minimum: int = 0,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"Loader option '{option_name}' must be an integer.")
+    if value < minimum:
+        raise ValueError(
+            f"Loader option '{option_name}' must be greater than or equal to {minimum}."
+        )
+    return value
+
+
+def _get_loader_settings(config: Dict[str, Any], split: str) -> Dict[str, Any]:
+    loader_config = config.get("loader_config")
+    if loader_config is None:
+        loader_config = {}
+    if not isinstance(loader_config, dict):
+        raise ValueError("config['loader_config'] must be a JSON object when provided.")
+
+    split_config = loader_config.get(split)
+    if split_config is None:
+        split_config = {}
+    if not isinstance(split_config, dict):
+        raise ValueError(
+            f"config['loader_config']['{split}'] must be a JSON object when provided."
+        )
+
+    num_workers_value = split_config.get(
+        "num_workers",
+        loader_config.get("num_workers", 0),
+    )
+    num_workers = _coerce_loader_int(
+        num_workers_value,
+        f"loader_config.{split}.num_workers",
+    )
+
+    settings: Dict[str, Any] = {"num_workers": num_workers}
+    if num_workers == 0:
+        return settings
+
+    persistent_value = split_config.get(
+        "persistent_workers",
+        loader_config.get("persistent_workers"),
+    )
+    if persistent_value is not None:
+        settings["persistent_workers"] = _coerce_loader_bool(
+            persistent_value,
+            f"loader_config.{split}.persistent_workers",
+        )
+
+    prefetch_value = split_config.get(
+        "prefetch_factor",
+        loader_config.get("prefetch_factor"),
+    )
+    if prefetch_value is not None:
+        settings["prefetch_factor"] = _coerce_loader_int(
+            prefetch_value,
+            f"loader_config.{split}.prefetch_factor",
+            minimum=1,
+        )
+
+    return settings
+
+
+def _build_dataloader_kwargs(config: Dict[str, Any], split: str) -> Dict[str, Any]:
+    loader_settings = _get_loader_settings(config, split)
+    loader_kwargs: Dict[str, Any] = {
+        "num_workers": loader_settings["num_workers"],
+        "pin_memory": torch.cuda.is_available(),
+    }
+    if loader_settings["num_workers"] > 0:
+        if "persistent_workers" in loader_settings:
+            loader_kwargs["persistent_workers"] = loader_settings["persistent_workers"]
+        if "prefetch_factor" in loader_settings:
+            loader_kwargs["prefetch_factor"] = loader_settings["prefetch_factor"]
+    return loader_kwargs
+
+
 def get_loader(
         workflow_paths: WorkflowPaths,
         seed: int,
@@ -498,13 +589,14 @@ def get_loader(
                                                rir_path=config.get("rir_path", "RIR_data"))
         gen = torch.Generator()
         gen.manual_seed(seed)
+        train_loader_kwargs = _build_dataloader_kwargs(config, "train")
         trn_loader = DataLoader(train_set,
                                 batch_size=config["batch_size"],
                                 shuffle=True,
                                 drop_last=True,
-                                pin_memory=torch.cuda.is_available(),
                                 worker_init_fn=seed_worker,
-                                generator=gen)
+                                generator=gen,
+                                **train_loader_kwargs)
 
     if load_dev:
         dev_database_path = workflow_paths.dev_audio_root
@@ -514,11 +606,12 @@ def get_loader(
 
         dev_set = TestDataset(list_IDs=file_dev,
                                                 base_dir=dev_database_path)
+        dev_loader_kwargs = _build_dataloader_kwargs(config, "dev")
         dev_loader = DataLoader(dev_set,
                                 batch_size=config["batch_size"],
                                 shuffle=False,
                                 drop_last=False,
-                                pin_memory=torch.cuda.is_available())
+                                **dev_loader_kwargs)
 
     if load_eval:
         eval_database_path = workflow_paths.eval_audio_root
@@ -528,11 +621,12 @@ def get_loader(
 
         eval_set = TestDataset(list_IDs=file_eval,
                                                 base_dir=eval_database_path)
+        eval_loader_kwargs = _build_dataloader_kwargs(config, "eval")
         eval_loader = DataLoader(eval_set,
                                 batch_size=config["batch_size"],
                                 shuffle=False,
                                 drop_last=False,
-                                pin_memory=torch.cuda.is_available())
+                                **eval_loader_kwargs)
 
     return trn_loader, dev_loader, eval_loader
 
@@ -550,14 +644,16 @@ def produce_evaluation_file(
     trial_records = load_trial_records(trial_path)
     fname_list = []
     score_list = []
+    use_non_blocking = device.type == "cuda"
     for batch_x, utt_id in tqdm(data_loader):
-        batch_x = batch_x.to(device)
+        batch_x = batch_x.to(device, non_blocking=use_non_blocking)
         with torch.no_grad():
             batch_out, _ = forward_with_defense(
                 model=model,
                 wav=batch_x,
                 defense_kwargs=defense_kwargs,
                 defense_samples=defense_samples,
+                vectorized=defense_samples > 1,
             )
             batch_score = (batch_out[:, 1]).data.cpu().numpy().ravel()
         # add outputs
@@ -606,6 +702,7 @@ def train_epoch(
     criterion = nn.CrossEntropyLoss(weight=weight)
     defense_kwargs = get_defense_kwargs(config)
     defense_samples = get_defense_samples(config)
+    use_non_blocking = device.type == "cuda"
 
 
     for batch_x, batch_y in tqdm(trn_loader):
@@ -614,8 +711,11 @@ def train_epoch(
         ii += 1
 
         # Move to GPU
-        batch_x = batch_x.to(device)
-        batch_y = batch_y.view(-1).type(torch.int64).to(device)
+        batch_x = batch_x.to(device, non_blocking=use_non_blocking)
+        batch_y = batch_y.view(-1).type(torch.int64).to(
+            device,
+            non_blocking=use_non_blocking,
+        )
 
 
         # Forward pass

@@ -149,17 +149,60 @@ def defend_audio(wav, sigma=0.001, normalize=True, clamp=True):
     return wav
 
 
+def _prepare_defense_input(wav, normalize=True, clamp=True):
+    if normalize:
+        return preprocess_audio(wav)
+    if clamp:
+        return torch.clamp(wav, -1.0, 1.0)
+    return wav
+
+
+def _defend_audio_samples_vectorized(
+    wav,
+    defense_samples: int,
+    sigma=0.001,
+    normalize=True,
+    clamp=True,
+):
+    prepared_wav = _prepare_defense_input(
+        wav,
+        normalize=normalize,
+        clamp=clamp,
+    )
+    defended_wavs = prepared_wav.unsqueeze(0).repeat(defense_samples, 1, 1)
+
+    if sigma > 0:
+        defended_wavs = defended_wavs + torch.randn_like(defended_wavs) * sigma
+
+    if clamp:
+        defended_wavs = torch.clamp(defended_wavs, -1.0, 1.0)
+
+    return defended_wavs
+
+
 def forward_with_defense(
     model,
     wav,
     defense_kwargs: Optional[Dict[str, Any]] = None,
     defense_samples: int = 1,
+    vectorized: bool = False,
 ):
     defense_kwargs = defense_kwargs or {}
     if defense_samples < 1:
         raise ValueError(
             f"defense_samples must be at least 1, got {defense_samples}."
         )
+
+    if vectorized and defense_samples > 1:
+        defended_wavs = _defend_audio_samples_vectorized(
+            wav,
+            defense_samples=defense_samples,
+            **defense_kwargs,
+        )
+        batch_size = wav.shape[0]
+        accumulated_logits = model(defended_wavs.reshape(defense_samples * batch_size, -1))
+        averaged_logits = accumulated_logits.reshape(defense_samples, batch_size, -1).mean(dim=0)
+        return averaged_logits, defended_wavs[0]
 
     defended_wav = defend_audio(wav, **defense_kwargs)
     accumulated_logits = model(defended_wav)

@@ -182,7 +182,7 @@ class SSLModel(nn.Module):
             self_state[name].copy_(param)
 
     def extract_feat(self, input_data):
-        emb, layer_results =  self.model.extract_features(input_data)
+        emb, _ = self.model.extract_features(input_data, ret_layer_results=False)
         return emb
             
 class SEModule(nn.Module):

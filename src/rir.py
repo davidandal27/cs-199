@@ -18,7 +18,7 @@ class RIRReverberation:
         path = random.sample(self.files, 1)[0]
         
         rir, _ = sf.read(path)
-        rir = rir.astype(np.float64)
+        rir = rir.astype(float)
         rir = np.expand_dims(rir, 0)
         rir = rir / np.sqrt(np.sum(rir**2))
         
