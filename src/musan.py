@@ -3,6 +3,8 @@ import random
 import numpy as np
 import soundfile as sf
 
+from .audio_utils import read_audio_file
+
 class Musan:
     Category = ['noise','speech','music']
     
@@ -60,7 +62,7 @@ class Musan:
             info = sf.info(f)
             wav_size = int(info.samplerate * info.duration)
             if wav_size <= x_size:
-                noise, _ = sf.read(f, start=0)
+                noise, _ = read_audio_file(f, start=0)
                 noise_size = noise.shape[0]
                 if noise_size < x_size:
                     shortage = x_size - noise_size
@@ -69,7 +71,7 @@ class Musan:
                     )
             else:
                 index = random.randint(0, wav_size - x_size - 1)
-                noise, _ = sf.read(f, start=index, stop=index + x_size)
+                noise, _ = read_audio_file(f, start=index, stop=index + x_size)
 
             noises.append(noise)
         

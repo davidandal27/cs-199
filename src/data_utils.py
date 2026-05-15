@@ -1,10 +1,10 @@
 import numpy as np
-import soundfile as sf
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 import random
 from pathlib import Path
+from .audio_utils import read_audio_file
 from .musan import Musan
 from .rir import RIRReverberation
 
@@ -15,18 +15,6 @@ LABEL_MAP = {
     "bonafide": 1,
     "spoof": 0,
 }
-
-
-def read_audio_file(audio_path):
-    audio_path = Path(audio_path)
-    if not audio_path.is_file():
-        raise FileNotFoundError(f"Audio file not found: '{audio_path}'")
-
-    try:
-        return sf.read(str(audio_path))
-    except Exception as exc:
-        raise RuntimeError(f"Failed to read audio file '{audio_path}': {exc}") from exc
-
 
 def parse_trial_line(line):
     fields = line.strip().split()

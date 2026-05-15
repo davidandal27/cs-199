@@ -1,8 +1,9 @@
 import os
 import random
 import numpy as np
-import soundfile as sf
 from scipy import signal
+
+from .audio_utils import read_audio_file
 
 class RIRReverberation:
     def __init__(self, path):
@@ -17,7 +18,7 @@ class RIRReverberation:
     def __call__(self, x):
         path = random.sample(self.files, 1)[0]
         
-        rir, _ = sf.read(path)
+        rir, _ = read_audio_file(path)
         rir = rir.astype(float)
         rir = np.expand_dims(rir, 0)
         rir = rir / np.sqrt(np.sum(rir**2))
