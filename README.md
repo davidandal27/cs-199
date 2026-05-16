@@ -24,14 +24,28 @@ pip install -r requirements.txt
 ```
 
 ## Usage
-Before running the experiment, replace the data directory of `database_path` in the config file of `./config/AASIST_ASVspoof5.conf`.
+Before running the experiment, replace the data directory of `database_path` in the config file you plan to use, such as `./config/WavLM_Nes2Net_ASVspoof5.conf` or `./config/WavLM_AASIST_ASVspoof5.conf`.
 
-To train & evaluate the model:
-```
+### Single-GPU / local launch
+Use the plain Python entrypoint for local or single-GPU runs:
+
+```bash
 python -m training.main \
   --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
   --defense-config ./config/defense.conf
 ```
+
+### Multi-GPU HPC launch (`torchrun`)
+For the single-node `4`-GPU DDP path, launch with `torchrun` and treat `--batch-size` as a per-process value. For the first pass, use `8` per GPU:
+
+```bash
+torchrun --standalone --nproc_per_node=4 -m training.main \
+  --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
+  --defense-config ./config/defense.conf \
+  --batch-size 8
+```
+
+See [docs/TRAINING_MAIN_HPC.md](docs/TRAINING_MAIN_HPC.md) for the full HPC procedure, path overrides, verification checklist, and startup failure conditions.
 
 This automatically picks the last .pth file generated
 ```
