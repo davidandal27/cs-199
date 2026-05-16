@@ -1,8 +1,9 @@
 import json
+import math
 import warnings
 from importlib import import_module
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from src.path_utils import apply_path_overrides, resolve_workflow_paths
 from src.defense_utils import (
@@ -172,6 +173,112 @@ def build_model(model_config: Dict[str, Any], device):
     return model
 
 
+def load_plain_model_weights(model, weights_path, device) -> None:
+    import torch
+
+    state_dict = torch.load(weights_path, map_location=device)
+    model.load_state_dict(state_dict)
+
+
+def canonicalize_scores_by_trial_records(
+    trial_records,
+    utterance_ids: Sequence[str],
+    scores: Sequence[float],
+    *,
+    allow_duplicate_utterances: bool = False,
+) -> Tuple[List[str], List[float]]:
+    if len(utterance_ids) != len(scores):
+        raise ValueError(
+            "Utterance and score counts must match before score ordering."
+        )
+
+    expected_utterance_ids = [record["utterance_id"] for record in trial_records]
+    if allow_duplicate_utterances and len(expected_utterance_ids) != len(set(expected_utterance_ids)):
+        raise ValueError(
+            "Distributed score merging requires unique utterance IDs in the trial file."
+        )
+
+    expected_utterance_id_set = set(expected_utterance_ids)
+    extra_utterance_ids = sorted(set(utterance_ids) - expected_utterance_id_set)
+    if extra_utterance_ids:
+        preview = ", ".join(extra_utterance_ids[:5])
+        raise ValueError(
+            "Scoring produced utterance IDs not present in the trial file: "
+            f"{preview}."
+        )
+
+    score_by_utterance_id: Dict[str, float] = {}
+    for utterance_id, score in zip(utterance_ids, scores):
+        normalized_score = float(score)
+        if utterance_id in score_by_utterance_id:
+            if not allow_duplicate_utterances:
+                raise ValueError(
+                    "Duplicate utterance IDs were produced during score collection: "
+                    f"{utterance_id}."
+                )
+            if not math.isclose(
+                score_by_utterance_id[utterance_id],
+                normalized_score,
+                rel_tol=1e-6,
+                abs_tol=1e-7,
+            ):
+                raise ValueError(
+                    "Duplicate utterance IDs were gathered with conflicting scores: "
+                    f"{utterance_id}."
+                )
+            continue
+        score_by_utterance_id[utterance_id] = normalized_score
+
+    missing_utterance_ids = [
+        utterance_id
+        for utterance_id in expected_utterance_ids
+        if utterance_id not in score_by_utterance_id
+    ]
+    if missing_utterance_ids:
+        preview = ", ".join(missing_utterance_ids[:5])
+        raise ValueError(
+            "Scoring did not produce scores for every trial utterance. "
+            f"Missing examples: {preview}."
+        )
+
+    ordered_scores = [
+        score_by_utterance_id[utterance_id]
+        for utterance_id in expected_utterance_ids
+    ]
+    return expected_utterance_ids, ordered_scores
+
+
+def merge_gathered_score_payloads(
+    trial_records,
+    gathered_payloads: Sequence[Dict[str, Sequence[float]]],
+) -> Tuple[List[str], List[float]]:
+    merged_utterance_ids: List[str] = []
+    merged_scores: List[float] = []
+
+    for payload in gathered_payloads:
+        if payload is None:
+            continue
+        payload_utterance_ids = payload.get("utterance_ids")
+        payload_scores = payload.get("scores")
+        if payload_utterance_ids is None or payload_scores is None:
+            raise ValueError(
+                "Gathered score payloads must contain 'utterance_ids' and 'scores'."
+            )
+        if len(payload_utterance_ids) != len(payload_scores):
+            raise ValueError(
+                "Gathered score payload utterance and score counts must match."
+            )
+        merged_utterance_ids.extend(payload_utterance_ids)
+        merged_scores.extend(payload_scores)
+
+    return canonicalize_scores_by_trial_records(
+        trial_records=trial_records,
+        utterance_ids=merged_utterance_ids,
+        scores=merged_scores,
+        allow_duplicate_utterances=True,
+    )
+
+
 def generate_adversarial_batch(
     model,
     batch_x,
@@ -326,19 +433,15 @@ def _write_ordered_score_lines(
     utterance_ids: List[str],
     scores: List[float],
 ) -> None:
-    if len(trial_records) != len(utterance_ids) or len(utterance_ids) != len(scores):
-        raise ValueError(
-            "Trial record, utterance, and score counts must match for score writing."
-        )
+    utterance_ids, scores = canonicalize_scores_by_trial_records(
+        trial_records=trial_records,
+        utterance_ids=utterance_ids,
+        scores=scores,
+    )
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
     with open(save_path, "w") as score_file:
         for record, utt_id, score in zip(trial_records, utterance_ids, scores):
-            if record["utterance_id"] != utt_id:
-                raise ValueError(
-                    "Utterance ordering mismatch while writing scores: "
-                    f"expected '{record['utterance_id']}', got '{utt_id}'."
-                )
             score_file.write(
                 f"{record['speaker_id']} {record['utterance_id']} {score} {record['label_name']}\n"
             )
@@ -353,19 +456,14 @@ def compute_cm_metrics_from_trial_records(
 
     from eval.calculate_modules import calculate_CLLR, compute_eer, compute_mindcf
 
-    if len(trial_records) != len(utterance_ids) or len(utterance_ids) != len(scores):
-        raise ValueError(
-            "Trial record, utterance, and score counts must match for metric computation."
-        )
-
+    utterance_ids, scores = canonicalize_scores_by_trial_records(
+        trial_records=trial_records,
+        utterance_ids=utterance_ids,
+        scores=scores,
+    )
     ordered_labels = []
     ordered_scores = []
     for record, utt_id, score in zip(trial_records, utterance_ids, scores):
-        if record["utterance_id"] != utt_id:
-            raise ValueError(
-                "Utterance ordering mismatch while computing metrics: "
-                f"expected '{record['utterance_id']}', got '{utt_id}'."
-            )
         ordered_labels.append(record["label_name"])
         ordered_scores.append(score)
 
@@ -419,8 +517,7 @@ def write_score_file(
     from tqdm import tqdm
 
     model.eval()
-    with open(trial_path, "r") as trial_file:
-        trial_lines = trial_file.readlines()
+    trial_records = load_trial_records(trial_path)
 
     utterance_ids = []
     scores = []
@@ -432,12 +529,12 @@ def write_score_file(
         utterance_ids.extend(batch_utt_ids)
         scores.extend(batch_scores.tolist())
 
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(save_path, "w") as score_file:
-        for utt_id, score, trial_line in zip(utterance_ids, scores, trial_lines):
-            spk_id, trial_utt_id, _, _, _, _, _, _, key, _ = trial_line.strip().split(" ")
-            assert utt_id == trial_utt_id
-            score_file.write(f"{spk_id} {trial_utt_id} {score} {key}\n")
+    _write_ordered_score_lines(
+        save_path=save_path,
+        trial_records=trial_records,
+        utterance_ids=utterance_ids,
+        scores=scores,
+    )
 
 
 def write_metric_report(
@@ -648,7 +745,7 @@ def run_clean_evaluation(
     defense_samples = get_defense_samples(config)
 
     model = build_model(config["model_config"], device)
-    model.load_state_dict(torch.load(paths.model_weights_path, map_location=device))
+    load_plain_model_weights(model, paths.model_weights_path, device)
 
     effective_batch_size = batch_size or config["batch_size"]
     eval_loader, trial_path, trial_records = build_labeled_eval_loader(
@@ -775,7 +872,7 @@ def run_fgsm_scoring_pipeline(
     defense_samples = get_defense_samples(config)
 
     model = build_model(config["model_config"], device)
-    model.load_state_dict(torch.load(paths.model_weights_path, map_location=device))
+    load_plain_model_weights(model, paths.model_weights_path, device)
 
     effective_batch_size = batch_size or config["batch_size"]
     eval_loader, trial_path, trial_records = build_labeled_eval_loader(
