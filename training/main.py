@@ -312,6 +312,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Path to the model weight file for evaluation.",
     )
+    parser.add_argument(
+        "--freeze-backbone",
+        action="store_true",
+        help="Freeze feature extractor layers during fine-tuning"
+    )
     return parser.parse_args()
 
 
@@ -427,13 +432,26 @@ def broadcast_from_primary(
     return payload_container[0]
 
 
-def load_plain_checkpoint(
-    model: torch.nn.Module,
-    model_path: Path,
-    device: torch.device,
-) -> None:
-    load_plain_model_weights(unwrap_model(model), model_path, device)
+def load_plain_checkpoint(model, model_path: Path, device: torch.device) -> None:
+    checkpoint = torch.load(model_path, map_location=device)
 
+    if isinstance(checkpoint, dict) and "model" in checkpoint:
+        state_dict = checkpoint["model"]
+    else:
+        state_dict = checkpoint
+
+    model = unwrap_model(model)
+
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+
+    print(f"[Checkpoint] Loaded: {model_path}")
+    print(f"[Checkpoint] Missing keys: {len(missing)}")
+    print(f"[Checkpoint] Unexpected keys: {len(unexpected)}")
+        
+def freeze_backbone(model):
+    for name, param in model.named_parameters():
+        if "classifier" not in name:   # adjust depending on your model
+            param.requires_grad = False
 
 def main(args: argparse.Namespace) -> None:
     """
@@ -522,15 +540,23 @@ def main(args: argparse.Namespace) -> None:
         defense_kwargs = get_defense_kwargs(config)
         defense_samples = get_defense_samples(config)
 
-        # define model architecture
+
         model = get_model(model_config, device)
+
+        if args.eval_model_weights is not None:
+            print("[INFO] Loading pretrained weights for fine-tuning")
+            load_plain_checkpoint(model, Path(args.eval_model_weights), device)
+
+        if args.freeze_backbone:
+            print("[INFO] Freezing backbone layers")
+            freeze_backbone(model)
+        # wrap with DDP AFTER loading weights
         if runtime.is_distributed:
             model = DistributedDataParallel(
                 model,
                 device_ids=[runtime.local_rank],
                 output_device=runtime.local_rank,
             )
-
         # define dataloaders
         loaders = get_loader(
             workflow_paths,
@@ -555,7 +581,8 @@ def main(args: argparse.Namespace) -> None:
         optimizer_swa = None
         if args.train:
             optim_config["steps_per_epoch"] = len(trn_loader)
-            optimizer, scheduler = create_optimizer(model.parameters(), optim_config)
+            trainable_params = filter(lambda p: p.requires_grad, model.parameters())
+            optimizer, scheduler = create_optimizer(trainable_params, optim_config)
             optimizer_swa = SWA(optimizer)
 
         best_dev_eer = 100.
@@ -709,7 +736,6 @@ def save_epoch_checkpoint(
     epoch: int,
 ) -> Path:
     checkpoint_path = model_save_path / "epoch_{:03d}.pth".format(epoch)
-    torch.save(unwrap_model(model).state_dict(), checkpoint_path)
     return checkpoint_path
 
 def get_model(model_config: Dict, device: torch.device):
