@@ -91,6 +91,7 @@ To run matched clean and PGD scoring from the same ordered trial list:
 ```bash
 python -m attacks.eval_pgd \
   --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
+  --defense-config ./config/defense.conf \
   --weights /path/to/checkpoint.pth \
   --output-dir /path/to/output \
   --dataset-root /path/to/data \
@@ -103,13 +104,14 @@ python -m attacks.eval_pgd \
   --batch-size 8
 ```
 
-PGD in this repo is an untargeted `Linf` waveform attack that iterates projected updates over multiple steps. Compared with FGSM, it is slower but typically a stronger attack because it reuses gradients several times instead of taking a single step.
+PGD in this repo is an untargeted `Linf` waveform attack that iterates projected updates over multiple steps. Compared with FGSM, it is slower but typically a stronger attack because it reuses gradients several times instead of taking a single step. The PGD entrypoint now writes three comparable views from the same ordered trial list: clean scores, undefended adversarial scores, and a final defended adversarial pass that reuses the shared randomized-smoothing config.
 
 Practical default recommendation:
 
 - start with `PGD-5` using `--epsilon 0.001 --steps 5`
 - leave `--alpha` unset unless you need manual control, because the CLI derives it as `epsilon / steps`
 - keep `--random-start` off for the first pass so repeated runs stay easier to compare
+- pass `--defense-config ./config/defense.conf` when you want explicit control over `sigma`, `samples`, normalization, and clamp settings for the defended pass
 - only increase `--steps` when there is a concrete reason to pay for longer runtimes
 
 Runtime guidance for large evaluation sets:
@@ -118,15 +120,26 @@ Runtime guidance for large evaluation sets:
 - reduce `--batch-size` first if you hit GPU memory limits
 - keep `--save-adv-audio` off unless you explicitly need waveform inspection, because it increases disk I/O and runtime
 - use `--metrics-only` when you only need the computed comparisons and do not want score, metric, or summary files written
+- remember that randomized smoothing multiplies defended inference cost by `defense.samples`, so raise `samples` conservatively on Colab or shared HPC queues
 
 The PGD run writes artifacts under `output/<model_tag>/<split>_pgd_eval/`. By default this includes:
 
 - `clean_scores.txt`
 - `pgd_eps_<epsilon>_steps_<steps>_scores.txt`
+- `pgd_eps_<epsilon>_steps_<steps>_defended_scores.txt`
 - `clean_metrics.txt`
 - `pgd_eps_<epsilon>_steps_<steps>_metrics.txt`
+- `pgd_eps_<epsilon>_steps_<steps>_defended_metrics.txt`
 - `pgd_metrics_summary.json`
 - `pgd_metrics_summary.txt`
+
+### Distributed FGSM / PGD evaluation status
+
+Single-node multi-GPU attack evaluation is now implemented for clean eval, FGSM, and PGD through the shared helpers in `src/distributed_eval.py` and the distributed paths in `src/eval_utils.py`, `attacks/eval_fgsm.py`, and `attacks/eval_pgd.py`. Launch these paths with `torchrun` using the same `LOCAL_RANK` / `RANK` / `WORLD_SIZE` contract already used by `training/main.py`.
+
+In distributed mode, each rank scores a deterministic shard, writes rank-local temporary payloads under `.dist_eval`, and leaves rank 0 to merge and canonicalize final score ordering, merge temp adversarial-audio directories, and print the final CLI summary once. Operator guidance for the runtime contract and concurrent-job GPU partitioning is documented in [`docs/ATTACK_EVAL_DISTRIBUTED.md`](docs/ATTACK_EVAL_DISTRIBUTED.md), including the recommended split of FGSM on `CUDA_VISIBLE_DEVICES=0,1` while PGD runs on `CUDA_VISIBLE_DEVICES=2,3`.
+
+This repository pass validates the distributed contract through focused code inspection and unit coverage. Full end-to-end multi-GPU dataset runs on real ASVspoof5 assets remain an operator-side verification step.
 
 ## Colab FGSM Workflow
 
@@ -170,6 +183,7 @@ Minimal Colab CLI example with explicit Drive-backed paths:
 ```bash
 python -m attacks.eval_pgd \
   --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
+  --defense-config ./config/defense.conf \
   --weights "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/checkpoints/model.pth" \
   --output-dir "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/outputs" \
   --dataset-root "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/data" \

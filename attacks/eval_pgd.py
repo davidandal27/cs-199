@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
@@ -11,6 +12,10 @@ from src.pgd_utils import DEFAULT_CLAMP_MAX, DEFAULT_CLAMP_MIN, DEFAULT_PGD_STEP
 
 
 DEFAULT_PGD_EPSILON = 0.001
+
+
+def _should_print_cli_output() -> bool:
+    return os.environ.get("RANK") in (None, "0")
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -70,6 +75,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         dest="ssl_pretrained_path",
         default=None,
         help="Optional WavLM checkpoint override.",
+    )
+    parser.add_argument(
+        "--defense-config",
+        "--defense_config",
+        dest="defense_config",
+        default=None,
+        help="Optional shared defense config JSON override for the defended PGD pass.",
     )
     parser.add_argument(
         "--batch-size",
@@ -147,6 +159,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Run PGD scoring without a clean pass. Clean comparison fields are omitted.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=1234,
+        help="Random seed for reproducible stochastic defense evaluation.",
+    )
     return parser.parse_args(argv)
 
 
@@ -185,13 +203,19 @@ def _print_runtime_notes(args: argparse.Namespace) -> None:
         print("Runtime note: metrics_only=True disables score, metric, and summary file writes.")
     if args.skip_clean_pass:
         print("Runtime note: skip_clean_pass=True disables clean scoring and clean-vs-PGD deltas.")
+    if args.defense_config is not None:
+        print(
+            "Runtime note: "
+            "the defended PGD pass will load smoothing settings from the shared defense config."
+        )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     from src.eval_utils import run_pgd_scoring_pipeline
 
     args = parse_args(argv)
-    _print_runtime_notes(args)
+    if _should_print_cli_output():
+        _print_runtime_notes(args)
 
     result = run_pgd_scoring_pipeline(
         config_path=args.config,
@@ -203,6 +227,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         trial_file=args.trial_file,
         audio_root=args.audio_root,
         ssl_pretrained_path=args.ssl_pretrained_path,
+        defense_config_path=args.defense_config,
         batch_size=args.batch_size,
         epsilon=args.epsilon,
         steps=args.steps,
@@ -215,7 +240,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         save_adv_audio=args.save_adv_audio,
         metrics_only=args.metrics_only,
         skip_clean_pass=args.skip_clean_pass,
+        seed=args.seed,
     )
+    if not _should_print_cli_output():
+        return
 
     print(f"Scored split: {result['split']}")
     print(f"Checkpoint: {result['weights_path']}")
@@ -224,10 +252,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         print(f"Clean scores: {result['clean_score_path']}")
     if result["adv_score_path"] is not None:
         print(f"Adversarial scores: {result['adv_score_path']}")
+    if result["defended_score_path"] is not None:
+        print(f"Defended scores: {result['defended_score_path']}")
     if result["clean_metrics_path"] is not None:
         print(f"Clean metrics: {result['clean_metrics_path']}")
     if result["adv_metrics_path"] is not None:
         print(f"Adversarial metrics: {result['adv_metrics_path']}")
+    if result["defended_metrics_path"] is not None:
+        print(f"Defended metrics: {result['defended_metrics_path']}")
     if result["adv_audio_dir"] is not None:
         print(f"Adversarial audio: {result['adv_audio_dir']}")
     if result["summary_json_path"] is not None:
@@ -235,7 +267,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if result["summary_text_path"] is not None:
         print(f"Summary TXT: {result['summary_text_path']}")
     print(f"Utterances scored: {result['utterance_count']}")
-    if not result["skip_clean_pass"]:
+    if not result.get("skip_clean_pass", False):
         print(
             "Clean metrics: "
             f"minDCF={result['metrics']['min_dcf']['clean']:.6f}, "
@@ -248,6 +280,24 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         f"EER={result['metrics']['eer']['adversarial'] * 100:.6f}%, "
         f"CLLR={result['metrics']['cllr']['adversarial'] * 100:.6f}%"
     )
+    print(
+        "Defended metrics: "
+        f"minDCF={result['metrics']['min_dcf']['defended']:.6f}, "
+        f"EER={result['metrics']['eer']['defended'] * 100:.6f}%, "
+        f"CLLR={result['metrics']['cllr']['defended'] * 100:.6f}%"
+    )
+    print(
+        "Defense settings: "
+        f"sigma={result['defense_sigma']:.6f}, "
+        f"samples={result['defense_samples']}, "
+        f"normalize={result['defense_normalize']}, "
+        f"clamp={result['defense_clamp']}"
+    )
+    if result["defense_samples"] > 1:
+        print(
+            "Runtime note: "
+            "randomized smoothing multiplies defended inference cost by the number of defense samples."
+        )
     if result["attack_stats"]:
         print(
             "PGD stats: "

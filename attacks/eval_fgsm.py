@@ -1,10 +1,15 @@
 import argparse
+import os
 import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def _should_print_cli_output() -> bool:
+    return os.environ.get("RANK") in (None, "0")
 
 
 def parse_args() -> argparse.Namespace:
@@ -168,6 +173,8 @@ def main() -> None:
             metrics_only=args.metrics_only,
             seed=args.seed,
         )
+        if not _should_print_cli_output():
+            return
         print(f"Scored split: {result['split']}")
         print(f"Checkpoint: {result['weights_path']}")
         print(f"Trial file: {result['trial_path']}")
@@ -227,6 +234,8 @@ def main() -> None:
         metrics_only=args.metrics_only,
         seed=args.seed,
     )
+    if not _should_print_cli_output():
+        return
     print(f"Scored split: {result['split']}")
     print(f"Checkpoint: {result['weights_path']}")
     if result["score_path"] is not None:
