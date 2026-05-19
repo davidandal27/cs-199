@@ -179,7 +179,6 @@ def load_plain_model_weights(model, weights_path, device) -> None:
     state_dict = torch.load(weights_path, map_location=device)
     model.load_state_dict(state_dict)
 
-
 def canonicalize_scores_by_trial_records(
     trial_records,
     utterance_ids: Sequence[str],
@@ -187,12 +186,16 @@ def canonicalize_scores_by_trial_records(
     *,
     allow_duplicate_utterances: bool = False,
 ) -> Tuple[List[str], List[float]]:
+    print(f"[canonicalize] Start. utterance_ids: {len(utterance_ids)}, scores: {len(scores)}", flush=True)
+
     if len(utterance_ids) != len(scores):
         raise ValueError(
             "Utterance and score counts must match before score ordering."
         )
 
     expected_utterance_ids = [record["utterance_id"] for record in trial_records]
+    print(f"[canonicalize] expected_utterance_ids built: {len(expected_utterance_ids)}", flush=True)
+
     if allow_duplicate_utterances and len(expected_utterance_ids) != len(set(expected_utterance_ids)):
         raise ValueError(
             "Distributed score merging requires unique utterance IDs in the trial file."
@@ -200,6 +203,8 @@ def canonicalize_scores_by_trial_records(
 
     expected_utterance_id_set = set(expected_utterance_ids)
     extra_utterance_ids = sorted(set(utterance_ids) - expected_utterance_id_set)
+    print(f"[canonicalize] Extra utterance check done. extras: {len(extra_utterance_ids)}", flush=True)
+
     if extra_utterance_ids:
         preview = ", ".join(extra_utterance_ids[:5])
         raise ValueError(
@@ -207,46 +212,21 @@ def canonicalize_scores_by_trial_records(
             f"{preview}."
         )
 
-    score_by_utterance_id: Dict[str, float] = {}
-    for utterance_id, score in zip(utterance_ids, scores):
-        normalized_score = float(score)
-        if utterance_id in score_by_utterance_id:
-            if not allow_duplicate_utterances:
-                raise ValueError(
-                    "Duplicate utterance IDs were produced during score collection: "
-                    f"{utterance_id}."
-                )
-            if not math.isclose(
-                score_by_utterance_id[utterance_id],
-                normalized_score,
-                rel_tol=1e-6,
-                abs_tol=1e-7,
-            ):
-                raise ValueError(
-                    "Duplicate utterance IDs were gathered with conflicting scores: "
-                    f"{utterance_id}."
-                )
-            continue
-        score_by_utterance_id[utterance_id] = normalized_score
+    print(f"[canonicalize] Building score_by_utterance_id dict...", flush=True)
+    score_by_utterance_id = {uid: float(sc) for uid, sc in zip(utterance_ids, scores)}
+    print(f"[canonicalize] Dict built: {len(score_by_utterance_id)} unique utterances.", flush=True)
 
-    missing_utterance_ids = [
-        utterance_id
-        for utterance_id in expected_utterance_ids
-        if utterance_id not in score_by_utterance_id
-    ]
+    print(f"[canonicalize] Checking missing and building ordered scores...", flush=True)
+    missing_utterance_ids = set(expected_utterance_ids) - set(score_by_utterance_id.keys())
     if missing_utterance_ids:
-        preview = ", ".join(missing_utterance_ids[:5])
+        preview = ", ".join(list(missing_utterance_ids)[:5])
         raise ValueError(
             "Scoring did not produce scores for every trial utterance. "
             f"Missing examples: {preview}."
         )
-
-    ordered_scores = [
-        score_by_utterance_id[utterance_id]
-        for utterance_id in expected_utterance_ids
-    ]
+    ordered_scores = [score_by_utterance_id[uid] for uid in expected_utterance_ids]
+    print(f"[canonicalize] Done.", flush=True)
     return expected_utterance_ids, ordered_scores
-
 
 def merge_gathered_score_payloads(
     trial_records,

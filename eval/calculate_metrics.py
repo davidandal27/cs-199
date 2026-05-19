@@ -18,20 +18,31 @@ def calculate_minDCF_EER_CLLR(cm_scores_file,
         'Cfa' : 10, # Cost of CM system falsely accepting nontarget speaker
     }
 
-
     # Load CM scores
-    cm_data = np.genfromtxt(cm_scores_file, dtype=str)
-    cm_keys = cm_data[:, 3]
-    cm_scores = cm_data[:, 2].astype(np.float64)
+    print("[metrics] Loading scores file...", flush=True)
+    import pandas as pd
+    cm_df = pd.read_csv(cm_scores_file, sep=' ', header=None)
+    cm_keys = cm_df.iloc[:, 3].values
+    cm_scores = cm_df.iloc[:, 2].values.astype(np.float64)
+    print(f"[metrics] Loaded {len(cm_scores)} rows.", flush=True)
 
     # Extract bona fide (real human) and spoof scores from the CM scores
     bona_cm = cm_scores[cm_keys == 'bonafide']
     spoof_cm = cm_scores[cm_keys == 'spoof']
+    print(f"[metrics] bonafide: {len(bona_cm)}, spoof: {len(spoof_cm)}", flush=True)
 
     # EERs of the standalone systems and fix ASV operating point to EER threshold
+    print("[metrics] Computing EER...", flush=True)
     eer_cm, frr, far, thresholds = compute_eer(bona_cm, spoof_cm)#[0]
+    print(f"[metrics] EER done: {eer_cm}", flush=True)
+
+    print("[metrics] Computing CLLR...", flush=True)
     cllr_cm = calculate_CLLR(bona_cm, spoof_cm)
+    print(f"[metrics] CLLR done: {cllr_cm}", flush=True)
+
+    print("[metrics] Computing minDCF...", flush=True)
     minDCF_cm, _ = compute_mindcf(frr, far, thresholds, Pspoof, dcf_cost_model['Cmiss'], dcf_cost_model['Cfa'])
+    print(f"[metrics] minDCF done: {minDCF_cm}", flush=True)
 
     if printout:
         with open(output_file, "w") as f_res:
@@ -47,6 +58,7 @@ def calculate_minDCF_EER_CLLR(cm_scores_file,
                             cllr_cm * 100))
         os.system(f"cat {output_file}")
 
+    print("[metrics] All metrics done.", flush=True)
     return minDCF_cm, eer_cm, cllr_cm
 
 

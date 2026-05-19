@@ -97,17 +97,11 @@ def compute_eer(target_scores, nontarget_scores):
 
 
 def compute_mindcf(frr, far, thresholds, Pspoof, Cmiss, Cfa):
-    min_c_det = float("inf")
-    min_c_det_threshold = thresholds
-
-    p_target = 1- Pspoof
-    for i in range(0, len(frr)):
-        # Weighted sum of false negative and false positive errors.
-        c_det = Cmiss * frr[i] * p_target + Cfa * far[i] * (1 - p_target)
-        if c_det < min_c_det:
-            min_c_det = c_det
-            min_c_det_threshold = thresholds[i]
-    # See Equations (3) and (4).  Now we normalize the cost.
+    p_target = 1 - Pspoof
+    c_det = Cmiss * frr * p_target + Cfa * far * (1 - p_target)
+    min_c_det_idx = np.argmin(c_det)
+    min_c_det = c_det[min_c_det_idx]
+    min_c_det_threshold = thresholds[min_c_det_idx]
     c_def = min(Cmiss * p_target, Cfa * (1 - p_target))
     min_dcf = min_c_det / c_def
     return min_dcf, min_c_det_threshold

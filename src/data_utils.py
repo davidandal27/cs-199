@@ -150,7 +150,7 @@ class TestDataset(Dataset):
 
     def __getitem__(self, index):
         key = self.list_IDs[index]
-        X, _ = read_audio_file(self.base_dir / f"{key}.flac")
+        X, _ = read_audio_file(self.base_dir / f"{key}.flac", frames=self.cut)
         X_pad = pad(X, self.cut)
         x_inp = Tensor(X_pad)
         return x_inp, key
@@ -169,7 +169,7 @@ class LabeledEvalDataset(Dataset):
     def __getitem__(self, index):
         record = self.trial_records[index]
         key = record["utterance_id"]
-        X, _ = read_audio_file(self.base_dir / f"{key}.flac")
+        X, _ = read_audio_file(self.base_dir / f"{key}.flac", frames=self.cut)
         X_pad = pad(X, self.cut)
         x_inp = Tensor(X_pad)
 

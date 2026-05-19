@@ -260,6 +260,14 @@ def parse_args() -> argparse.Namespace:
         help="Optional batch size override.",
     )
     parser.add_argument(
+        "--dev-batch-size",
+        "--dev_batch_size",
+        dest="dev_batch_size",
+        type=int,
+        default=None,
+        help="Optional dev batch size override. Defaults to training batch size if not set.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=1234,
@@ -529,6 +537,8 @@ def main(args: argparse.Namespace) -> None:
                 model,
                 device_ids=[runtime.local_rank],
                 output_device=runtime.local_rank,
+                find_unused_parameters=True,
+                broadcast_buffers=False,
             )
 
         # define dataloaders
@@ -545,6 +555,7 @@ def main(args: argparse.Namespace) -> None:
                 if uses_multi_rank_distribution(runtime)
                 else set()
             ),
+            dev_batch_size=args.dev_batch_size,
         )
         trn_loader = loaders.train_loader
         dev_loader = loaders.dev_loader
@@ -590,10 +601,12 @@ def main(args: argparse.Namespace) -> None:
                         epoch=epoch,
                     )
                     print("Saved checkpoint: {}".format(epoch_checkpoint_path))
-                if epoch < args.start_val_epoch:
+                if args.start_val_epoch == 0 or epoch % args.start_val_epoch != 0:
                     print("DONE.\nLoss:{:.5f}. Skip validation step".format(running_loss))
+                    distributed_barrier(runtime)
                     continue
 
+                print(f"[rank {runtime.rank}] Starting produce_evaluation_file...", flush=True)
                 validation_state = None
                 produce_evaluation_file(
                     dev_loader,
@@ -605,7 +618,10 @@ def main(args: argparse.Namespace) -> None:
                     defense_kwargs=defense_kwargs,
                     defense_samples=defense_samples,
                 )
+                print(f"[rank {runtime.rank}] produce_evaluation_file done.", flush=True)
+
                 if is_primary_rank(runtime):
+                    print("[rank 0] Calculating metrics...", flush=True)
                     dev_eer, dev_dcf, dev_cllr = calculate_minDCF_EER_CLLR(
                         cm_scores_file=metric_path/"dev_score.txt",
                         output_file=metric_path/"dev_DCF_EER_{}epo.txt".format(epoch),
@@ -655,8 +671,13 @@ def main(args: argparse.Namespace) -> None:
                         "no_improve": no_improve,
                         "is_best_model": is_best_model,
                     }
+                    print("[rank 0] Validation state ready, reaching barrier...", flush=True)
 
+                print(f"[rank {runtime.rank}] Reaching barrier before broadcast...", flush=True)
+                distributed_barrier(runtime)
+                print(f"[rank {runtime.rank}] Past barrier, broadcasting...", flush=True)
                 validation_state = broadcast_from_primary(runtime, validation_state)
+                print(f"[rank {runtime.rank}] Broadcast done.", flush=True)
                 if validation_state is None:
                     raise RuntimeError("Primary rank did not publish validation state.")
 
@@ -665,8 +686,10 @@ def main(args: argparse.Namespace) -> None:
                 best_dev_cllr = validation_state["best_dev_cllr"]
                 no_improve = validation_state["no_improve"]
                 if validation_state["is_best_model"]:
+                    print(f"[rank {runtime.rank}] Updating SWA...", flush=True)
                     optimizer_swa.update_swa()
                 if no_improve >= config["early_stop_epochs"]:
+                    print(f"[rank {runtime.rank}] Early stopping triggered.", flush=True)
                     break
 
         # evaluates pretrained model on the evaluation split
@@ -822,7 +845,8 @@ def get_loader(
         distributed_splits: Optional[Set[str]] = None,
         load_train: bool = True,
         load_dev: bool = True,
-        load_eval: bool = True) -> LoaderBundle:
+        load_eval: bool = True,
+        dev_batch_size: Optional[int] = None) -> LoaderBundle:
     """Make PyTorch DataLoaders for train / development / evaluation."""
 
     trn_loader = None
@@ -880,13 +904,13 @@ def get_loader(
                 dev_set,
                 num_replicas=distributed_runtime.world_size,
                 rank=distributed_runtime.rank,
-                shuffle=False,
+                shuffle=True,
                 seed=seed,
                 drop_last=False,
             )
         dev_loader_kwargs = _build_dataloader_kwargs(config, "dev")
         dev_loader = DataLoader(dev_set,
-                                batch_size=config["batch_size"],
+                                batch_size=dev_batch_size or config["batch_size"],
                                 shuffle=False,
                                 sampler=dev_sampler,
                                 drop_last=False,
@@ -958,35 +982,55 @@ def produce_evaluation_file(
         score_list.extend(batch_score.tolist())
 
     if uses_multi_rank_distribution(runtime):
-        gathered_payloads: List[Optional[Dict[str, List[float]]]] = [None] * runtime.world_size
-        dist.all_gather_object(
-            gathered_payloads,
-            {"utterance_ids": fname_list, "scores": score_list},
-        )
+        print(f"[rank {runtime.rank}] Writing temp score file...", flush=True)
+        tmp_path = Path(save_path).parent / f"tmp_scores_rank{runtime.rank}.txt"
+        with open(tmp_path, "w") as f:
+            for fn, sc in zip(fname_list, score_list):
+                f.write(f"{fn} {sc}\n")
+        print(f"[rank {runtime.rank}] Temp file written. Waiting at barrier...", flush=True)
+
+        distributed_barrier(runtime)
+
         if not is_primary_rank(runtime):
+            print(f"[rank {runtime.rank}] Past barrier, returning.", flush=True)
             return
-        fname_list, score_list = merge_gathered_score_payloads(
-            trial_records=trial_records,
-            gathered_payloads=gathered_payloads,
-        )
-    else:
+
+        print(f"[rank 0] All ranks done. Merging temp files...", flush=True)
+        all_fnames = []
+        all_scores = []
+        for r in range(runtime.world_size):
+            rpath = Path(save_path).parent / f"tmp_scores_rank{r}.txt"
+            with open(rpath) as f:
+                for line in f:
+                    fn, sc = line.strip().split()
+                    all_fnames.append(fn)
+                    all_scores.append(float(sc))
+            rpath.unlink()
+            print(f"[rank 0] Merged rank {r} scores.", flush=True)
+
+        fname_list = all_fnames
+        score_list = all_scores
+        print(f"[rank 0] Merge complete. Total scores: {len(score_list)}", flush=True)
+
+        print(f"[rank 0] Canonicalizing scores...", flush=True)
         fname_list, score_list = canonicalize_scores_by_trial_records(
             trial_records=trial_records,
             utterance_ids=fname_list,
             scores=score_list,
+            allow_duplicate_utterances=True,
         )
+        print(f"[rank 0] Canonicalization done. {len(score_list)} scores.", flush=True)
 
-    text_list = []
-    for record, fn, sco in zip(trial_records, fname_list, score_list):
-        text_list.append(
-            f"{record['speaker_id']} {record['utterance_id']} {sco} {record['label_name']}"
-        )
-
+    print(f"[rank 0] Building text list...", flush=True)
+    text_list = [
+        f"{r['speaker_id']} {r['utterance_id']} {s} {r['label_name']}"
+        for r, fn, s in zip(trial_records, fname_list, score_list)
+    ]
+    print(f"[rank 0] Writing scores to {save_path}...", flush=True)
     with open(save_path, "w") as fh:
         fh.write("\n".join(text_list) + '\n')
     del text_list
-    fh.close()
-    print("Scores saved to {}".format(save_path))
+    print(f"[rank 0] Scores file written.", flush=True)
 
 
 def train_epoch(
@@ -997,11 +1041,13 @@ def train_epoch(
     scheduler: torch.optim.lr_scheduler,
     config: argparse.Namespace):
     import torch.nn as nn
+    from torch.amp import autocast, GradScaler
 
     running_loss = 0
     num_total = 0.0
     ii = 0
     model.train()
+    scaler = GradScaler('cuda')
 
     # Loss function
     weight = torch.FloatTensor([0.1, 0.9]).to(device)
@@ -1010,38 +1056,32 @@ def train_epoch(
     defense_samples = get_defense_samples(config)
     use_non_blocking = device.type == "cuda"
 
-
     for batch_x, batch_y in tqdm(trn_loader):
         batch_size = batch_x.size(0)
         num_total += batch_size
         ii += 1
 
-        # Move to GPU
         batch_x = batch_x.to(device, non_blocking=use_non_blocking)
         batch_y = batch_y.view(-1).type(torch.int64).to(
             device,
             non_blocking=use_non_blocking,
         )
 
+        with autocast('cuda'):
+            batch_out, _ = forward_with_defense(
+                model=model,
+                wav=batch_x,
+                defense_kwargs=defense_kwargs,
+                defense_samples=defense_samples,
+            )
+            batch_loss = criterion(batch_out, batch_y)
 
-        # Forward pass
-        batch_out, _ = forward_with_defense(
-            model=model,
-            wav=batch_x,
-            defense_kwargs=defense_kwargs,
-            defense_samples=defense_samples,
-        )
-
-        # Compute loss
-        batch_loss = criterion(batch_out, batch_y)
-
-        # Backpropagation
         running_loss += batch_loss.item() * batch_size
         optim.zero_grad()
-        batch_loss.backward()
-        optim.step()
+        scaler.scale(batch_loss).backward()
+        scaler.step(optim)
+        scaler.update()
 
-        # Learning rate scheduler
         if config["optim_config"]["scheduler"] in ["cosine", "keras_decay"]:
             scheduler.step()
         elif scheduler is None:
