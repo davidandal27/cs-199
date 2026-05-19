@@ -64,6 +64,47 @@ python -m attacks.eval_fgsm \
 
 If your audio and TSV files are not under the same dataset root, pass `--audio-root` to the directory that actually contains the `.flac` files for the active split and `--trial-file` to the exact TSV you want to score. `--dataset-root` can still point to any existing dataset base directory for compatibility with the config.
 
+To run matched clean and PGD scoring from the same ordered trial list:
+```bash
+python -m attacks.eval_pgd \
+  --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
+  --weights /path/to/checkpoint.pth \
+  --output-dir /path/to/output \
+  --dataset-root /path/to/data \
+  --audio-root /path/to/eval_audio \
+  --trial-file /path/to/ASVspoof5.eval.track_1.tsv \
+  --ssl-pretrained-path /path/to/WavLM-Large.pt \
+  --split eval \
+  --epsilon 0.001 \
+  --steps 5 \
+  --batch-size 8
+```
+
+PGD in this repo is an untargeted `Linf` waveform attack that iterates projected updates over multiple steps. Compared with FGSM, it is slower but typically a stronger attack because it reuses gradients several times instead of taking a single step.
+
+Practical default recommendation:
+
+- start with `PGD-5` using `--epsilon 0.001 --steps 5`
+- leave `--alpha` unset unless you need manual control, because the CLI derives it as `epsilon / steps`
+- keep `--random-start` off for the first pass so repeated runs stay easier to compare
+- only increase `--steps` when there is a concrete reason to pay for longer runtimes
+
+Runtime guidance for large evaluation sets:
+
+- start with `--split dev` as a dry run before launching the full eval split
+- reduce `--batch-size` first if you hit GPU memory limits
+- keep `--save-adv-audio` off unless you explicitly need waveform inspection, because it increases disk I/O and runtime
+- use `--metrics-only` when you only need the computed comparisons and do not want score, metric, or summary files written
+
+The PGD run writes artifacts under `output/<model_tag>/<split>_pgd_eval/`. By default this includes:
+
+- `clean_scores.txt`
+- `pgd_eps_<epsilon>_steps_<steps>_scores.txt`
+- `clean_metrics.txt`
+- `pgd_eps_<epsilon>_steps_<steps>_metrics.txt`
+- `pgd_metrics_summary.json`
+- `pgd_metrics_summary.txt`
+
 ## Colab FGSM Workflow
 
 The repository includes [`notebooks/fgsm_eval_colab.ipynb`](notebooks/fgsm_eval_colab.ipynb) for a step-by-step Google Colab flow. The notebook is organized as:
@@ -88,6 +129,34 @@ python -m attacks.eval_fgsm \
   --split eval \
   --epsilon 0.001
 ```
+
+## Colab PGD Workflow
+
+The repository includes [`notebooks/pgd_eval_colab.ipynb`](notebooks/pgd_eval_colab.ipynb) for the matching Google Colab PGD flow. The notebook is organized as:
+
+- mount Google Drive
+- enter the repo and install dependencies
+- define Drive-backed dataset, checkpoint, backbone, and output paths
+- validate those paths before scoring
+- run clean evaluation
+- run PGD scoring with the practical `PGD-5` baseline
+- inspect the clean vs adversarial JSON and text summaries
+
+Minimal Colab CLI example with explicit Drive-backed paths:
+```bash
+python -m attacks.eval_pgd \
+  --config ./config/WavLM_Nes2Net_ASVspoof5.conf \
+  --weights "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/checkpoints/model.pth" \
+  --output-dir "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/outputs" \
+  --dataset-root "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/data" \
+  --metadata-root "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/data" \
+  --ssl-pretrained-path "/content/drive/MyDrive/Education/Subjects/CS 199: Special Problems II/project_storage/pretrained_models/WavLM-Large.pt" \
+  --split eval \
+  --epsilon 0.001 \
+  --steps 5
+```
+
+For a dry-run checklist and expected PGD artifacts, see [`docs/PGD_VERIFICATION.md`](docs/PGD_VERIFICATION.md).
 
 ## Repository Layout
 - `training/`: training and evaluation entrypoints

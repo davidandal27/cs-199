@@ -1,0 +1,25 @@
+PGD METRIC SUMMARY
+split = eval
+architecture = wavlm_nes2net
+checkpoint_path = /Users/dundale/Downloads/repos-acads/cs-199/test_items/checkpoint.pth
+dataset_root = /Users/dundale/Downloads/repos-acads/cs-199/test_items
+trial_file = /Users/dundale/Downloads/repos-acads/cs-199/test_items/ASVspoof5.eval.local_2.tsv
+output_dir = /Users/dundale/Downloads/repos-acads/cs-199/output/WavLM_Nes2Net_ASVspoof5_fulldev_estop5_bs64/eval_pgd_eval
+device = cpu
+batch_size = 2
+epsilon = 0.001
+steps = 5
+alpha = 0.0002
+random_start = False
+clamp_min = -1.0
+clamp_max = 1.0
+clean_score_file = None
+adversarial_score_file = /Users/dundale/Downloads/repos-acads/cs-199/output/WavLM_Nes2Net_ASVspoof5_fulldev_estop5_bs64/eval_pgd_eval/pgd_eps_0p001_steps_5_scores.txt
+clean_metric_file = None
+adversarial_metric_file = /Users/dundale/Downloads/repos-acads/cs-199/output/WavLM_Nes2Net_ASVspoof5_fulldev_estop5_bs64/eval_pgd_eval/pgd_eps_0p001_steps_5_metrics.txt
+adversarial_audio_dir = None
+utterance_count = 2
+
+minDCF: adversarial=1.000000000
+EER: adversarial=100.000000000%
+CLLR: adversarial=500.202407857%
