@@ -71,10 +71,8 @@ class PgdAttackConfig:
 class PgdArtifactContract:
     run_dir: Path
     clean_score_path: Path
-    adv_score_path: Path
     defended_score_path: Path
     clean_metrics_path: Path
-    adv_metrics_path: Path
     defended_metrics_path: Path
     summary_json_path: Path
     summary_text_path: Path
@@ -85,16 +83,13 @@ def build_pgd_artifact_contract(
     run_dir: Path,
     attack_config: PgdAttackConfig,
     clean_score_filename: str = "clean_scores.txt",
-    adv_score_filename: Optional[str] = None,
 ) -> PgdArtifactContract:
     artifact_stem = attack_config.artifact_stem
     return PgdArtifactContract(
         run_dir=run_dir,
         clean_score_path=run_dir / clean_score_filename,
-        adv_score_path=run_dir / (adv_score_filename or f"{artifact_stem}_scores.txt"),
         defended_score_path=run_dir / f"{artifact_stem}_defended_scores.txt",
         clean_metrics_path=run_dir / "clean_metrics.txt",
-        adv_metrics_path=run_dir / f"{artifact_stem}_metrics.txt",
         defended_metrics_path=run_dir / f"{artifact_stem}_defended_metrics.txt",
         summary_json_path=run_dir / "pgd_metrics_summary.json",
         summary_text_path=run_dir / "pgd_metrics_summary.txt",
@@ -125,10 +120,8 @@ def build_pgd_summary_stub(
         "device": device,
         "batch_size": batch_size,
         "clean_score_path": str(artifacts.clean_score_path),
-        "adv_score_path": str(artifacts.adv_score_path),
         "defended_score_path": str(artifacts.defended_score_path),
         "clean_metrics_path": str(artifacts.clean_metrics_path),
-        "adv_metrics_path": str(artifacts.adv_metrics_path),
         "defended_metrics_path": str(artifacts.defended_metrics_path),
         "adv_audio_dir": str(artifacts.adv_audio_dir) if artifacts.adv_audio_dir else None,
     }

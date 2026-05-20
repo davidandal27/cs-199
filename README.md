@@ -104,7 +104,7 @@ python -m attacks.eval_pgd \
   --batch-size 8
 ```
 
-PGD in this repo is an untargeted `Linf` waveform attack that iterates projected updates over multiple steps. Compared with FGSM, it is slower but typically a stronger attack because it reuses gradients several times instead of taking a single step. The PGD entrypoint now writes three comparable views from the same ordered trial list: clean scores, undefended adversarial scores, and a final defended adversarial pass that reuses the shared randomized-smoothing config.
+PGD in this repo is an untargeted `Linf` waveform attack that iterates projected updates over multiple steps. Compared with FGSM, it is slower but typically a stronger attack because it reuses gradients several times instead of taking a single step. The PGD entrypoint now keeps the attack generation on the plain model but emits only the optional clean pass plus the final defended adversarial pass that reuses the shared randomized-smoothing config.
 
 Practical default recommendation:
 
@@ -125,10 +125,8 @@ Runtime guidance for large evaluation sets:
 The PGD run writes artifacts under `output/<model_tag>/<split>_pgd_eval/`. By default this includes:
 
 - `clean_scores.txt`
-- `pgd_eps_<epsilon>_steps_<steps>_scores.txt`
 - `pgd_eps_<epsilon>_steps_<steps>_defended_scores.txt`
 - `clean_metrics.txt`
-- `pgd_eps_<epsilon>_steps_<steps>_metrics.txt`
 - `pgd_eps_<epsilon>_steps_<steps>_defended_metrics.txt`
 - `pgd_metrics_summary.json`
 - `pgd_metrics_summary.txt`
@@ -177,7 +175,7 @@ The repository includes [`notebooks/pgd_eval_colab.ipynb`](notebooks/pgd_eval_co
 - validate those paths before scoring
 - run clean evaluation
 - run PGD scoring with the practical `PGD-5` baseline
-- inspect the clean vs adversarial JSON and text summaries
+- inspect the clean vs defended-on-PGD JSON and text summaries
 
 Minimal Colab CLI example with explicit Drive-backed paths:
 ```bash

@@ -20,7 +20,7 @@ def _should_print_cli_output() -> bool:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Eval-only entry point for matched clean and PGD ASVspoof5 scoring."
+        description="Eval-only entry point for matched clean and defended PGD ASVspoof5 scoring."
     )
     parser.add_argument("--config", required=True, help="Path to the config file.")
     parser.add_argument(
@@ -122,13 +122,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Filename for clean scores in the matched clean-vs-PGD run.",
     )
     parser.add_argument(
-        "--adv-score-filename",
-        "--adv_score_filename",
-        dest="adv_score_filename",
-        default=None,
-        help="Optional custom adversarial score filename.",
-    )
-    parser.add_argument(
         "--clamp-min",
         "--clamp_min",
         dest="clamp_min",
@@ -183,6 +176,10 @@ def _print_runtime_notes(args: argparse.Namespace) -> None:
         f"clamp=[{args.clamp_min:.6f}, {args.clamp_max:.6f}]"
     )
     print(f"Output root: {args.output_dir}")
+    print(
+        "Runtime note: PGD examples are generated against the plain model, "
+        "but only defended attacked scores are emitted."
+    )
 
     if args.steps > DEFAULT_PGD_STEPS:
         print(
@@ -236,7 +233,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         clamp_min=args.clamp_min,
         clamp_max=args.clamp_max,
         clean_score_filename=args.clean_score_filename,
-        adv_score_filename=args.adv_score_filename,
         save_adv_audio=args.save_adv_audio,
         metrics_only=args.metrics_only,
         skip_clean_pass=args.skip_clean_pass,
@@ -250,14 +246,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     print(f"Trial file: {result['trial_path']}")
     if result["clean_score_path"] is not None:
         print(f"Clean scores: {result['clean_score_path']}")
-    if result["adv_score_path"] is not None:
-        print(f"Adversarial scores: {result['adv_score_path']}")
     if result["defended_score_path"] is not None:
         print(f"Defended scores: {result['defended_score_path']}")
     if result["clean_metrics_path"] is not None:
         print(f"Clean metrics: {result['clean_metrics_path']}")
-    if result["adv_metrics_path"] is not None:
-        print(f"Adversarial metrics: {result['adv_metrics_path']}")
     if result["defended_metrics_path"] is not None:
         print(f"Defended metrics: {result['defended_metrics_path']}")
     if result["adv_audio_dir"] is not None:
@@ -274,12 +266,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             f"EER={result['metrics']['eer']['clean'] * 100:.6f}%, "
             f"CLLR={result['metrics']['cllr']['clean'] * 100:.6f}%"
         )
-    print(
-        "Adversarial metrics: "
-        f"minDCF={result['metrics']['min_dcf']['adversarial']:.6f}, "
-        f"EER={result['metrics']['eer']['adversarial'] * 100:.6f}%, "
-        f"CLLR={result['metrics']['cllr']['adversarial'] * 100:.6f}%"
-    )
     print(
         "Defended metrics: "
         f"minDCF={result['metrics']['min_dcf']['defended']:.6f}, "

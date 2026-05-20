@@ -444,7 +444,6 @@ def _collect_pgd_attack_scores(
 
     model.eval()
     utterance_ids: List[str] = []
-    adv_scores: List[float] = []
     defended_scores: List[float] = []
     attack_stats: List[Dict[str, float]] = []
     defense_kwargs = defense_kwargs or {}
@@ -454,8 +453,8 @@ def _collect_pgd_attack_scores(
         batch_x = batch_x.to(device, non_blocking=use_non_blocking)
         batch_y = batch_y.view(-1).type(torch.int64).to(device)
 
-        # PGD is generated against the plain model first, then the same
-        # adversarial batch is scored both directly and through the defense.
+        # PGD is still generated against the plain model, but the emitted
+        # attacked scores come only from the defended inference path.
         adv_batch_x, batch_stats = generate_pgd_adversarial_batch(
             model=model,
             batch_x=batch_x,
@@ -471,7 +470,6 @@ def _collect_pgd_attack_scores(
         attack_stats.append(batch_stats)
 
         with torch.no_grad():
-            adv_batch_out = model(adv_batch_x)
             defended_batch_out, _ = forward_with_defense(
                 model=model,
                 wav=adv_batch_x,
@@ -479,7 +477,6 @@ def _collect_pgd_attack_scores(
                 defense_samples=defense_samples,
                 vectorized=defense_samples > 1,
             )
-            adv_batch_scores = adv_batch_out[:, 1].data.cpu().numpy().ravel()
             defended_batch_scores = defended_batch_out[:, 1].data.cpu().numpy().ravel()
 
         if adversarial_audio_dir is not None:
@@ -490,10 +487,9 @@ def _collect_pgd_attack_scores(
             )
 
         utterance_ids.extend(batch_utt_ids)
-        adv_scores.extend(adv_batch_scores.tolist())
         defended_scores.extend(defended_batch_scores.tolist())
 
-    return utterance_ids, adv_scores, defended_scores, attack_stats
+    return utterance_ids, defended_scores, attack_stats
 
 
 def _average_attack_stats(attack_stats: List[Dict[str, float]]) -> Dict[str, float]:
@@ -813,6 +809,41 @@ def build_defended_adv_metric_summary(
     return summary
 
 
+def build_clean_defended_metric_summary(
+    clean_metrics: Dict[str, float],
+    defended_metrics: Dict[str, float],
+) -> Dict[str, Dict[str, Optional[float]]]:
+    summary = {}
+    for metric_key in ("min_dcf", "eer", "cllr"):
+        clean_value = clean_metrics[metric_key]
+        defended_value = defended_metrics[metric_key]
+        summary[metric_key] = {
+            "clean": clean_value,
+            "defended": defended_value,
+            "defended_vs_clean_absolute_delta": defended_value - clean_value,
+            "defended_vs_clean_relative_delta": _relative_delta(
+                clean_value, defended_value
+            ),
+        }
+    return summary
+
+
+def build_defended_only_metric_summary(
+    defended_metrics: Dict[str, float],
+) -> Dict[str, Dict[str, Optional[float]]]:
+    return {
+        "min_dcf": {
+            "defended": defended_metrics["min_dcf"],
+        },
+        "eer": {
+            "defended": defended_metrics["eer"],
+        },
+        "cllr": {
+            "defended": defended_metrics["cllr"],
+        },
+    }
+
+
 def write_metric_summary_json(summary_path: Path, summary: Dict[str, Any]) -> None:
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     with open(summary_path, "w") as summary_file:
@@ -874,13 +905,17 @@ def write_metric_summary_text(summary_path: Path, summary: Dict[str, Any]) -> No
             summary_file.write(f"clamp_min = {summary['clamp_min']}\n")
         if "clamp_max" in summary:
             summary_file.write(f"clamp_max = {summary['clamp_max']}\n")
-        summary_file.write(f"clean_score_file = {summary['clean_score_path']}\n")
-        summary_file.write(f"adversarial_score_file = {summary['adv_score_path']}\n")
-        if "defended_score_path" in summary:
+        if "clean_score_path" in summary and summary["clean_score_path"] is not None:
+            summary_file.write(f"clean_score_file = {summary['clean_score_path']}\n")
+        if "adv_score_path" in summary and summary["adv_score_path"] is not None:
+            summary_file.write(f"adversarial_score_file = {summary['adv_score_path']}\n")
+        if "defended_score_path" in summary and summary["defended_score_path"] is not None:
             summary_file.write(f"defended_score_file = {summary['defended_score_path']}\n")
-        summary_file.write(f"clean_metric_file = {summary['clean_metrics_path']}\n")
-        summary_file.write(f"adversarial_metric_file = {summary['adv_metrics_path']}\n")
-        if "defended_metrics_path" in summary:
+        if "clean_metrics_path" in summary and summary["clean_metrics_path"] is not None:
+            summary_file.write(f"clean_metric_file = {summary['clean_metrics_path']}\n")
+        if "adv_metrics_path" in summary and summary["adv_metrics_path"] is not None:
+            summary_file.write(f"adversarial_metric_file = {summary['adv_metrics_path']}\n")
+        if "defended_metrics_path" in summary and summary["defended_metrics_path"] is not None:
             summary_file.write(
                 f"defended_metric_file = {summary['defended_metrics_path']}\n"
             )
@@ -890,13 +925,22 @@ def write_metric_summary_text(summary_path: Path, summary: Dict[str, Any]) -> No
         for metric_key in ("min_dcf", "eer", "cllr"):
             metric = summary["metrics"][metric_key]
             label = metric_names[metric_key]
-            adv_value = metric["adversarial"]
+            clean_value = metric.get("clean")
+            adv_value = metric.get("adversarial")
             defended_value = metric.get("defended")
-            if "clean" not in metric and defended_value is None:
+
+            if clean_value is None and adv_value is None and defended_value is not None:
+                summary_file.write(
+                    f"{label}: defended={_format_metric_value(metric_key, defended_value)}\n"
+                )
+                continue
+
+            if clean_value is None and adv_value is not None and defended_value is None:
                 adv_text = _format_metric_value(metric_key, adv_value)
                 summary_file.write(f"{label}: adversarial={adv_text}\n")
                 continue
-            if "clean" not in metric:
+
+            if clean_value is None and adv_value is not None:
                 summary_file.write(
                     f"{label}: adversarial={_format_metric_value(metric_key, adv_value)}, "
                     f"defended={_format_metric_value(metric_key, defended_value)}, "
@@ -907,8 +951,18 @@ def write_metric_summary_text(summary_path: Path, summary: Dict[str, Any]) -> No
                 )
                 continue
 
-            clean_value = metric["clean"]
-            if defended_value is None:
+            if clean_value is not None and adv_value is None and defended_value is not None:
+                summary_file.write(
+                    f"{label}: clean={_format_metric_value(metric_key, clean_value)}, "
+                    f"defended={_format_metric_value(metric_key, defended_value)}, "
+                    "defended_vs_clean_absolute_delta="
+                    f"{_format_metric_value(metric_key, metric.get('defended_vs_clean_absolute_delta'))}, "
+                    "defended_vs_clean_relative_delta="
+                    f"{_format_relative_value(metric.get('defended_vs_clean_relative_delta'))}\n"
+                )
+                continue
+
+            if clean_value is not None and defended_value is None and adv_value is not None:
                 summary_file.write(
                     f"{label}: clean={_format_metric_value(metric_key, clean_value)}, "
                     f"adversarial={_format_metric_value(metric_key, adv_value)}, "
@@ -1405,7 +1459,6 @@ def run_pgd_scoring_pipeline(
     clamp_min: float = -1.0,
     clamp_max: float = 1.0,
     clean_score_filename: str = "clean_scores.txt",
-    adv_score_filename: Optional[str] = None,
     save_adv_audio: bool = False,
     metrics_only: bool = False,
     skip_clean_pass: bool = False,
@@ -1496,7 +1549,6 @@ def run_pgd_scoring_pipeline(
             run_dir=run_dir,
             attack_config=attack_config,
             clean_score_filename=clean_score_filename,
-            adv_score_filename=adv_score_filename,
         )
         rank_adv_audio_dir = artifacts.adv_audio_dir
         if artifacts.adv_audio_dir is not None and uses_multi_rank_distribution(runtime):
@@ -1511,7 +1563,7 @@ def run_pgd_scoring_pipeline(
                 device=device,
             )
 
-        adv_utterance_ids, adv_scores, defended_scores, attack_stats = _collect_pgd_attack_scores(
+        attacked_utterance_ids, defended_scores, attack_stats = _collect_pgd_attack_scores(
             data_loader=eval_loader,
             model=model,
             device=device,
@@ -1526,8 +1578,8 @@ def run_pgd_scoring_pipeline(
             adversarial_audio_dir=rank_adv_audio_dir,
         )
 
-        if clean_utterance_ids is not None and clean_utterance_ids != adv_utterance_ids:
-            raise ValueError("Clean and adversarial scoring produced different utterance orders.")
+        if clean_utterance_ids is not None and clean_utterance_ids != attacked_utterance_ids:
+            raise ValueError("Clean and attacked scoring produced different utterance orders.")
 
         if uses_multi_rank_distribution(runtime):
             if clean_utterance_ids is not None and clean_scores is not None:
@@ -1542,8 +1594,7 @@ def run_pgd_scoring_pipeline(
                 artifact_stem="pgd_scores",
                 runtime=runtime,
                 payload={
-                    "utterance_ids": adv_utterance_ids,
-                    "adv_scores": adv_scores,
+                    "utterance_ids": attacked_utterance_ids,
                     "defended_scores": defended_scores,
                     "attack_stats": attack_stats,
                 },
@@ -1557,12 +1608,7 @@ def run_pgd_scoring_pipeline(
                         gathered_payloads=clean_payloads,
                     )
                 attack_payloads = _read_rank_payloads(run_dir, "pgd_scores", runtime)
-                adv_utterance_ids, adv_scores = merge_gathered_score_payloads(
-                    trial_records=trial_records,
-                    gathered_payloads=attack_payloads,
-                    score_key="adv_scores",
-                )
-                _, defended_scores = merge_gathered_score_payloads(
+                attacked_utterance_ids, defended_scores = merge_gathered_score_payloads(
                     trial_records=trial_records,
                     gathered_payloads=attack_payloads,
                     score_key="defended_scores",
@@ -1574,15 +1620,12 @@ def run_pgd_scoring_pipeline(
             attack_stats = _average_attack_stats(attack_stats)
 
         clean_metrics = None
-        adv_metrics = None
         defended_metrics = None
         metric_summary = None
         summary = None
         persisted_clean_score_path = None
-        persisted_adv_score_path = None
         persisted_defended_score_path = None
         persisted_clean_metrics_path = None
-        persisted_adv_metrics_path = None
         persisted_defended_metrics_path = None
         persisted_summary_json_path = None
         persisted_summary_text_path = None
@@ -1595,22 +1638,16 @@ def run_pgd_scoring_pipeline(
                     utterance_ids=clean_utterance_ids,
                     scores=clean_scores,
                 )
-            adv_metrics = compute_cm_metrics_from_trial_records(
-                trial_records=trial_records,
-                utterance_ids=adv_utterance_ids,
-                scores=adv_scores,
-            )
             defended_metrics = compute_cm_metrics_from_trial_records(
                 trial_records=trial_records,
-                utterance_ids=adv_utterance_ids,
+                utterance_ids=attacked_utterance_ids,
                 scores=defended_scores,
             )
-            if clean_metrics is None:
-                metric_summary = build_defended_adv_metric_summary(adv_metrics, defended_metrics)
-            else:
-                metric_summary = build_defended_metric_delta_summary(
-                    clean_metrics, adv_metrics, defended_metrics
-                )
+            metric_summary = (
+                build_defended_only_metric_summary(defended_metrics)
+                if clean_metrics is None
+                else build_clean_defended_metric_summary(clean_metrics, defended_metrics)
+            )
             summary = build_pgd_summary_stub(
                 split=split,
                 architecture=config["model_config"]["architecture"],
@@ -1623,7 +1660,7 @@ def run_pgd_scoring_pipeline(
                 attack_config=attack_config,
                 artifacts=artifacts,
             )
-            summary["utterance_count"] = len(adv_utterance_ids)
+            summary["utterance_count"] = len(attacked_utterance_ids)
             summary["metrics"] = metric_summary
             summary["attack_stats"] = attack_stats
             summary["defense_config_path"] = config.get("defense_config_path")
@@ -1652,21 +1689,9 @@ def run_pgd_scoring_pipeline(
 
                 if _try_write_artifact(
                     action=lambda: _write_ordered_score_lines(
-                        save_path=artifacts.adv_score_path,
-                        trial_records=trial_records,
-                        utterance_ids=adv_utterance_ids,
-                        scores=adv_scores,
-                    ),
-                    description=f"adversarial score file '{artifacts.adv_score_path}'",
-                    artifact_warnings=artifact_warnings,
-                ):
-                    persisted_adv_score_path = artifacts.adv_score_path
-
-                if _try_write_artifact(
-                    action=lambda: _write_ordered_score_lines(
                         save_path=artifacts.defended_score_path,
                         trial_records=trial_records,
-                        utterance_ids=adv_utterance_ids,
+                        utterance_ids=attacked_utterance_ids,
                         scores=defended_scores,
                     ),
                     description=f"defended adversarial score file '{artifacts.defended_score_path}'",
@@ -1686,18 +1711,6 @@ def run_pgd_scoring_pipeline(
                         artifact_warnings=artifact_warnings,
                     ):
                         persisted_clean_metrics_path = artifacts.clean_metrics_path
-
-                if _try_write_artifact(
-                    action=lambda: write_metric_report(
-                        metrics_path=artifacts.adv_metrics_path,
-                        min_dcf=adv_metrics["min_dcf"],
-                        eer=adv_metrics["eer"],
-                        cllr=adv_metrics["cllr"],
-                    ),
-                    description=f"adversarial metric report '{artifacts.adv_metrics_path}'",
-                    artifact_warnings=artifact_warnings,
-                ):
-                    persisted_adv_metrics_path = artifacts.adv_metrics_path
 
                 if _try_write_artifact(
                     action=lambda: write_metric_report(
@@ -1747,15 +1760,15 @@ def run_pgd_scoring_pipeline(
                 "clamp_min": attack_config.clamp_min,
                 "clamp_max": attack_config.clamp_max,
                 "clean_score_path": persisted_clean_score_path,
-                "adv_score_path": persisted_adv_score_path,
+                "adv_score_path": None,
                 "defended_score_path": persisted_defended_score_path,
                 "clean_metrics_path": persisted_clean_metrics_path,
-                "adv_metrics_path": persisted_adv_metrics_path,
+                "adv_metrics_path": None,
                 "defended_metrics_path": persisted_defended_metrics_path,
                 "adv_audio_dir": persisted_adv_audio_dir,
                 "summary_json_path": persisted_summary_json_path,
                 "summary_text_path": persisted_summary_text_path,
-                "utterance_count": len(adv_utterance_ids),
+                "utterance_count": len(attacked_utterance_ids),
                 "attack_stats": attack_stats,
                 "metrics": metric_summary,
                 "artifact_warnings": artifact_warnings,
