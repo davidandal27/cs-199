@@ -27,6 +27,95 @@ from src.defense_utils import (
 )
 
 
+def _coerce_eval_loader_bool(value: Any, option_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"Loader option '{option_name}' must be a boolean.")
+    return value
+
+
+def _coerce_eval_loader_int(
+    value: Any,
+    option_name: str,
+    *,
+    minimum: int = 0,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"Loader option '{option_name}' must be an integer.")
+    if value < minimum:
+        raise ValueError(
+            f"Loader option '{option_name}' must be greater than or equal to {minimum}."
+        )
+    return value
+
+
+def _get_eval_loader_settings(config: Dict[str, Any], split: str) -> Dict[str, Any]:
+    loader_config = config.get("loader_config")
+    if loader_config is None:
+        loader_config = {}
+    if not isinstance(loader_config, dict):
+        raise ValueError("config['loader_config'] must be a JSON object when provided.")
+
+    split_config = loader_config.get(split)
+    if split_config is None:
+        split_config = {}
+    if not isinstance(split_config, dict):
+        raise ValueError(
+            f"config['loader_config']['{split}'] must be a JSON object when provided."
+        )
+
+    num_workers_value = split_config.get(
+        "num_workers",
+        loader_config.get("num_workers", 0),
+    )
+    num_workers = _coerce_eval_loader_int(
+        num_workers_value,
+        f"loader_config.{split}.num_workers",
+    )
+
+    settings: Dict[str, Any] = {"num_workers": num_workers}
+    if num_workers == 0:
+        return settings
+
+    persistent_value = split_config.get(
+        "persistent_workers",
+        loader_config.get("persistent_workers"),
+    )
+    if persistent_value is not None:
+        settings["persistent_workers"] = _coerce_eval_loader_bool(
+            persistent_value,
+            f"loader_config.{split}.persistent_workers",
+        )
+
+    prefetch_value = split_config.get(
+        "prefetch_factor",
+        loader_config.get("prefetch_factor"),
+    )
+    if prefetch_value is not None:
+        settings["prefetch_factor"] = _coerce_eval_loader_int(
+            prefetch_value,
+            f"loader_config.{split}.prefetch_factor",
+            minimum=1,
+        )
+
+    return settings
+
+
+def _build_eval_dataloader_kwargs(config: Dict[str, Any], split: str) -> Dict[str, Any]:
+    import torch
+
+    loader_settings = _get_eval_loader_settings(config, split)
+    loader_kwargs: Dict[str, Any] = {
+        "num_workers": loader_settings["num_workers"],
+        "pin_memory": torch.cuda.is_available(),
+    }
+    if loader_settings["num_workers"] > 0:
+        if "persistent_workers" in loader_settings:
+            loader_kwargs["persistent_workers"] = loader_settings["persistent_workers"]
+        if "prefetch_factor" in loader_settings:
+            loader_kwargs["prefetch_factor"] = loader_settings["prefetch_factor"]
+    return loader_kwargs
+
+
 def resolve_eval_device():
     import torch
 
@@ -79,13 +168,13 @@ def apply_eval_path_fallbacks(
 
 
 def build_eval_loader(
+    config: Dict[str, Any],
     paths,
     batch_size: int,
     split: str,
     trial_path: Optional[Path] = None,
     distributed_runtime=None,
 ):
-    import torch
     from torch.utils.data import DataLoader
     from src.data_utils import TestDataset, genSpoof_list
 
@@ -106,18 +195,20 @@ def build_eval_loader(
             num_replicas=distributed_runtime.world_size,
             rank=distributed_runtime.rank,
         )
+    loader_kwargs = _build_eval_dataloader_kwargs(config, split)
     data_loader = DataLoader(
         eval_set,
         batch_size=batch_size,
         shuffle=False,
         sampler=sampler,
         drop_last=False,
-        pin_memory=torch.cuda.is_available(),
+        **loader_kwargs,
     )
     return data_loader, trial_path
 
 
 def build_labeled_eval_loader(
+    config: Dict[str, Any],
     paths,
     batch_size: int,
     split: str,
@@ -126,7 +217,6 @@ def build_labeled_eval_loader(
     distributed_runtime=None,
 ):
     from torch.utils.data import DataLoader
-    import torch
     from src.data_utils import LabeledEvalDataset, load_trial_records
 
     default_trial_path, audio_root = resolve_split_paths(paths=paths, split=split)
@@ -150,13 +240,14 @@ def build_labeled_eval_loader(
             num_replicas=distributed_runtime.world_size,
             rank=distributed_runtime.rank,
         )
+    loader_kwargs = _build_eval_dataloader_kwargs(config, split)
     data_loader = DataLoader(
         eval_set,
         batch_size=batch_size,
         shuffle=False,
         sampler=sampler,
         drop_last=False,
-        pin_memory=torch.cuda.is_available(),
+        **loader_kwargs,
     )
     return data_loader, trial_path, trial_records
 
@@ -1049,6 +1140,7 @@ def run_clean_evaluation(
 
         effective_batch_size = batch_size or config["batch_size"]
         eval_loader, trial_path, trial_records = build_labeled_eval_loader(
+            config,
             paths=paths,
             batch_size=effective_batch_size,
             split=split,
@@ -1203,6 +1295,7 @@ def run_fgsm_scoring_pipeline(
 
         effective_batch_size = batch_size or config["batch_size"]
         eval_loader, trial_path, trial_records = build_labeled_eval_loader(
+            config,
             paths,
             effective_batch_size,
             split,
@@ -1511,6 +1604,7 @@ def run_pgd_scoring_pipeline(
 
         effective_batch_size = batch_size or config["batch_size"]
         eval_loader, trial_path, trial_records = build_labeled_eval_loader(
+            config,
             paths,
             effective_batch_size,
             split,

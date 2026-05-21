@@ -1,6 +1,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import timedelta
 from typing import Iterator, Optional, Sequence, TypeVar
 
 import torch
@@ -64,6 +65,25 @@ def _parse_distributed_env_int(name: str, value: str) -> int:
         ) from exc
 
 
+def _resolve_process_group_timeout() -> timedelta:
+    timeout_value = os.environ.get("CS199_DISTRIBUTED_TIMEOUT_SECONDS")
+    if timeout_value is None:
+        # PGD eval can leave faster ranks waiting well beyond PyTorch's
+        # default 10-minute timeout before the first cross-rank sync.
+        return timedelta(hours=1)
+
+    timeout_seconds = _parse_distributed_env_int(
+        "CS199_DISTRIBUTED_TIMEOUT_SECONDS",
+        timeout_value,
+    )
+    if timeout_seconds < 1:
+        raise ValueError(
+            "CS199_DISTRIBUTED_TIMEOUT_SECONDS must be at least 1 second, "
+            f"got {timeout_seconds}."
+        )
+    return timedelta(seconds=timeout_seconds)
+
+
 def initialize_distributed_eval_runtime() -> DistributedEvalRuntime:
     env_values = {
         "LOCAL_RANK": os.environ.get("LOCAL_RANK"),
@@ -109,7 +129,10 @@ def initialize_distributed_eval_runtime() -> DistributedEvalRuntime:
         )
 
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(
+        backend="nccl",
+        timeout=_resolve_process_group_timeout(),
+    )
     return DistributedEvalRuntime(
         is_distributed=True,
         rank=rank,
