@@ -1,7 +1,7 @@
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import List, Optional, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -11,6 +11,38 @@ from src.pgd_utils import DEFAULT_CLAMP_MAX, DEFAULT_CLAMP_MIN, DEFAULT_PGD_STEP
 
 
 DEFAULT_PGD_EPSILON = 0.001
+
+
+def _parse_gpu_ids(raw_value: Optional[str]) -> Optional[List[int]]:
+    if raw_value is None:
+        return None
+
+    gpu_ids: List[int] = []
+    for token in raw_value.split(","):
+        stripped = token.strip()
+        if not stripped:
+            continue
+        try:
+            gpu_id = int(stripped)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"Invalid GPU id '{stripped}'. Expected a comma-separated list of integers."
+            ) from exc
+        if gpu_id < 0:
+            raise argparse.ArgumentTypeError(
+                f"GPU ids must be non-negative, got {gpu_id}."
+            )
+        gpu_ids.append(gpu_id)
+
+    if not gpu_ids:
+        raise argparse.ArgumentTypeError(
+            "Expected at least one GPU id when --gpu-ids is provided."
+        )
+    if len(set(gpu_ids)) != len(gpu_ids):
+        raise argparse.ArgumentTypeError(
+            f"GPU ids must be unique, got {raw_value!r}."
+        )
+    return gpu_ids
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -147,6 +179,37 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Run PGD scoring without a clean pass. Clean comparison fields are omitted.",
     )
+    parser.add_argument(
+        "--num-gpus",
+        "--num_gpus",
+        dest="num_gpus",
+        type=int,
+        default=1,
+        help=(
+            "Number of GPUs to use for PGD evaluation. "
+            "When greater than 1, the script spawns one worker per GPU and keeps the "
+            "parent process as a CPU-only coordinator."
+        ),
+    )
+    parser.add_argument(
+        "--gpu-ids",
+        "--gpu_ids",
+        dest="gpu_ids",
+        type=_parse_gpu_ids,
+        default=None,
+        help=(
+            "Optional comma-separated CUDA device ids to use in multi-GPU mode, "
+            'for example "0,1". Defaults to the first --num-gpus visible devices.'
+        ),
+    )
+    parser.add_argument(
+        "--num-workers",
+        "--num_workers",
+        dest="num_workers",
+        type=int,
+        default=0,
+        help="DataLoader worker count to use inside each scoring worker process.",
+    )
     return parser.parse_args(argv)
 
 
@@ -165,6 +228,12 @@ def _print_runtime_notes(args: argparse.Namespace) -> None:
         f"clamp=[{args.clamp_min:.6f}, {args.clamp_max:.6f}]"
     )
     print(f"Output root: {args.output_dir}")
+    print(
+        "Execution: "
+        f"num_gpus={args.num_gpus}, "
+        f"gpu_ids={args.gpu_ids if args.gpu_ids is not None else 'auto'}, "
+        f"num_workers={args.num_workers}"
+    )
 
     if args.steps > DEFAULT_PGD_STEPS:
         print(
@@ -185,6 +254,11 @@ def _print_runtime_notes(args: argparse.Namespace) -> None:
         print("Runtime note: metrics_only=True disables score, metric, and summary file writes.")
     if args.skip_clean_pass:
         print("Runtime note: skip_clean_pass=True disables clean scoring and clean-vs-PGD deltas.")
+    if args.num_gpus > 1:
+        print(
+            "Runtime note: multi-GPU mode keeps the parent process off the attack path "
+            "and uses one dedicated PGD worker per GPU."
+        )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
@@ -215,6 +289,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         save_adv_audio=args.save_adv_audio,
         metrics_only=args.metrics_only,
         skip_clean_pass=args.skip_clean_pass,
+        num_gpus=args.num_gpus,
+        gpu_ids=args.gpu_ids,
+        num_workers=args.num_workers,
     )
 
     print(f"Scored split: {result['split']}")

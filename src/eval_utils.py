@@ -1,8 +1,9 @@
 import json
+import shutil
 import warnings
 from importlib import import_module
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from src.path_utils import apply_path_overrides, resolve_workflow_paths
 
@@ -88,19 +89,28 @@ def build_labeled_eval_loader(
     split: str,
     trial_path: Optional[Path] = None,
     return_trial_line: bool = False,
+    trial_records_override: Optional[Sequence[Dict[str, Any]]] = None,
+    num_workers: int = 0,
 ):
     from torch.utils.data import DataLoader
-    from src.data_utils import LabeledEvalDataset, load_trial_records
+    from src.data_utils import LabeledEvalDataset
 
-    default_trial_path, audio_root = resolve_split_paths(paths=paths, split=split)
-    trial_path = trial_path or default_trial_path
-
-    trial_records = load_trial_records(trial_path)
-    validate_trial_audio_files(
-        utterance_ids=[record["utterance_id"] for record in trial_records],
-        audio_root=audio_root,
+    trial_path, loaded_trial_records, audio_root = _load_labeled_eval_records(
+        paths=paths,
+        split=split,
         trial_path=trial_path,
     )
+    trial_records = (
+        loaded_trial_records
+        if trial_records_override is None
+        else list(trial_records_override)
+    )
+    if trial_records_override is not None:
+        validate_trial_audio_files(
+            utterance_ids=[record["utterance_id"] for record in trial_records],
+            audio_root=audio_root,
+            trial_path=trial_path,
+        )
     eval_set = LabeledEvalDataset(
         trial_records=trial_records,
         base_dir=audio_root,
@@ -112,6 +122,7 @@ def build_labeled_eval_loader(
         shuffle=False,
         drop_last=False,
         pin_memory=True,
+        num_workers=num_workers,
     )
     return data_loader, trial_path, trial_records
 
@@ -150,6 +161,24 @@ def validate_trial_audio_files(
         "Check that --trial-file and --audio-root point to the same dataset split "
         "and that the audio directory is complete."
     )
+
+
+def _load_labeled_eval_records(
+    paths,
+    split: str,
+    trial_path: Optional[Path] = None,
+):
+    from src.data_utils import load_trial_records
+
+    default_trial_path, audio_root = resolve_split_paths(paths=paths, split=split)
+    trial_path = trial_path or default_trial_path
+    trial_records = load_trial_records(trial_path)
+    validate_trial_audio_files(
+        utterance_ids=[record["utterance_id"] for record in trial_records],
+        audio_root=audio_root,
+        trial_path=trial_path,
+    )
+    return trial_path, trial_records, audio_root
 
 
 def build_model(model_config: Dict[str, Any], device):
@@ -307,25 +336,179 @@ def _average_attack_stats(attack_stats: List[Dict[str, float]]) -> Dict[str, flo
     return summary
 
 
+def canonicalize_scores_by_trial_records(
+    trial_records,
+    utterance_ids: Sequence[str],
+    scores: Sequence[float],
+    *,
+    allow_duplicate_utterances: bool = False,
+) -> Tuple[List[str], List[float]]:
+    if len(utterance_ids) != len(scores):
+        raise ValueError(
+            "Utterance and score counts must match before score ordering."
+        )
+
+    expected_utterance_ids = [record["utterance_id"] for record in trial_records]
+    if not allow_duplicate_utterances and len(utterance_ids) != len(set(utterance_ids)):
+        raise ValueError("Scoring produced duplicate utterance IDs.")
+
+    expected_utterance_id_set = set(expected_utterance_ids)
+    extra_utterance_ids = sorted(set(utterance_ids) - expected_utterance_id_set)
+    if extra_utterance_ids:
+        preview = ", ".join(extra_utterance_ids[:5])
+        raise ValueError(
+            "Scoring produced utterance IDs not present in the trial file: "
+            f"{preview}."
+        )
+
+    score_by_utterance_id = {uid: float(score) for uid, score in zip(utterance_ids, scores)}
+    missing_utterance_ids = [
+        utterance_id
+        for utterance_id in expected_utterance_ids
+        if utterance_id not in score_by_utterance_id
+    ]
+    if missing_utterance_ids:
+        preview = ", ".join(missing_utterance_ids[:5])
+        raise ValueError(
+            "Scoring did not produce scores for every trial utterance. "
+            f"Missing examples: {preview}."
+        )
+
+    ordered_scores = [score_by_utterance_id[uid] for uid in expected_utterance_ids]
+    return expected_utterance_ids, ordered_scores
+
+
+def merge_gathered_score_payloads(
+    trial_records,
+    gathered_payloads: Sequence[Dict[str, Sequence[float]]],
+    *,
+    score_key: str = "scores",
+) -> Tuple[List[str], List[float]]:
+    merged_utterance_ids: List[str] = []
+    merged_scores: List[float] = []
+
+    for payload in gathered_payloads:
+        payload_utterance_ids = payload.get("utterance_ids")
+        payload_scores = payload.get(score_key)
+        if payload_utterance_ids is None or payload_scores is None:
+            raise ValueError(
+                "Gathered score payloads must contain 'utterance_ids' and the "
+                f"'{score_key}' field."
+            )
+        if len(payload_utterance_ids) != len(payload_scores):
+            raise ValueError(
+                "Gathered score payload utterance and score counts must match."
+            )
+        merged_utterance_ids.extend(payload_utterance_ids)
+        merged_scores.extend(payload_scores)
+
+    return canonicalize_scores_by_trial_records(
+        trial_records=trial_records,
+        utterance_ids=merged_utterance_ids,
+        scores=merged_scores,
+        allow_duplicate_utterances=True,
+    )
+
+
+def _worker_payload_path(run_dir: Path, artifact_stem: str, worker_index: int) -> Path:
+    return run_dir / ".dist_eval" / f"{artifact_stem}.worker{worker_index:05d}.json"
+
+
+def _worker_temp_dir(final_dir: Path, worker_index: int) -> Path:
+    return final_dir.parent / ".dist_eval" / f"{final_dir.name}.worker{worker_index:05d}"
+
+
+def _write_worker_payload(
+    run_dir: Path,
+    artifact_stem: str,
+    worker_index: int,
+    payload: Dict[str, Any],
+) -> Path:
+    payload_path = _worker_payload_path(run_dir, artifact_stem, worker_index)
+    payload_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(payload_path, "w") as payload_file:
+        json.dump(payload, payload_file)
+        payload_file.write("\n")
+    return payload_path
+
+
+def _read_worker_payloads(
+    run_dir: Path,
+    artifact_stem: str,
+    worker_count: int,
+) -> List[Dict[str, Any]]:
+    payloads: List[Dict[str, Any]] = []
+    for worker_index in range(worker_count):
+        payload_path = _worker_payload_path(run_dir, artifact_stem, worker_index)
+        with open(payload_path, "r") as payload_file:
+            payloads.append(json.load(payload_file))
+        payload_path.unlink()
+    return payloads
+
+
+def _merge_attack_stats_payloads(
+    gathered_payloads: Sequence[Dict[str, Any]],
+    *,
+    stats_key: str = "attack_stats",
+) -> Dict[str, float]:
+    merged_attack_stats: List[Dict[str, float]] = []
+    for payload in gathered_payloads:
+        attack_stats = payload.get(stats_key)
+        if attack_stats is None:
+            continue
+        merged_attack_stats.extend(attack_stats)
+    return _average_attack_stats(merged_attack_stats)
+
+
+def _merge_worker_audio_dirs(
+    final_audio_dir: Path,
+    worker_count: int,
+) -> None:
+    final_audio_dir.mkdir(parents=True, exist_ok=True)
+    for worker_index in range(worker_count):
+        source_dir = _worker_temp_dir(final_audio_dir, worker_index)
+        if not source_dir.exists():
+            continue
+        for source_path in sorted(source_dir.iterdir()):
+            destination_path = final_audio_dir / source_path.name
+            shutil.move(str(source_path), str(destination_path))
+        shutil.rmtree(source_dir)
+
+
+def _split_trial_records_evenly(
+    trial_records: Sequence[Dict[str, Any]],
+    shard_count: int,
+) -> List[List[Dict[str, Any]]]:
+    if shard_count < 1:
+        raise ValueError(f"shard_count must be at least 1, got {shard_count}.")
+
+    shard_records: List[List[Dict[str, Any]]] = []
+    total_records = len(trial_records)
+    base_shard_size = total_records // shard_count
+    remainder = total_records % shard_count
+    start = 0
+    for shard_index in range(shard_count):
+        stop = start + base_shard_size + (1 if shard_index < remainder else 0)
+        shard_records.append(list(trial_records[start:stop]))
+        start = stop
+    return shard_records
+
+
 def _write_ordered_score_lines(
     save_path: Path,
     trial_records,
     utterance_ids: List[str],
     scores: List[float],
 ) -> None:
-    if len(trial_records) != len(utterance_ids) or len(utterance_ids) != len(scores):
-        raise ValueError(
-            "Trial record, utterance, and score counts must match for score writing."
-        )
+    utterance_ids, scores = canonicalize_scores_by_trial_records(
+        trial_records=trial_records,
+        utterance_ids=utterance_ids,
+        scores=scores,
+    )
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
     with open(save_path, "w") as score_file:
         for record, utt_id, score in zip(trial_records, utterance_ids, scores):
-            if record["utterance_id"] != utt_id:
-                raise ValueError(
-                    "Utterance ordering mismatch while writing scores: "
-                    f"expected '{record['utterance_id']}', got '{utt_id}'."
-                )
             score_file.write(
                 f"{record['speaker_id']} {record['utterance_id']} {score} {record['label_name']}\n"
             )
@@ -340,19 +523,14 @@ def compute_cm_metrics_from_trial_records(
 
     from eval.calculate_modules import calculate_CLLR, compute_eer, compute_mindcf
 
-    if len(trial_records) != len(utterance_ids) or len(utterance_ids) != len(scores):
-        raise ValueError(
-            "Trial record, utterance, and score counts must match for metric computation."
-        )
-
+    utterance_ids, scores = canonicalize_scores_by_trial_records(
+        trial_records=trial_records,
+        utterance_ids=utterance_ids,
+        scores=scores,
+    )
     ordered_labels = []
     ordered_scores = []
     for record, utt_id, score in zip(trial_records, utterance_ids, scores):
-        if record["utterance_id"] != utt_id:
-            raise ValueError(
-                "Utterance ordering mismatch while computing metrics: "
-                f"expected '{record['utterance_id']}', got '{utt_id}'."
-            )
         ordered_labels.append(record["label_name"])
         ordered_scores.append(score)
 
@@ -923,6 +1101,416 @@ def run_fgsm_scoring_pipeline(
     }
 
 
+def _resolve_multi_gpu_ids(
+    num_gpus: int,
+    gpu_ids: Optional[Sequence[int]],
+) -> List[int]:
+    import torch
+
+    if num_gpus < 1:
+        raise ValueError(f"num_gpus must be at least 1, got {num_gpus}.")
+
+    visible_gpu_count = torch.cuda.device_count()
+    if visible_gpu_count == 0:
+        raise RuntimeError("Multi-GPU PGD evaluation requires visible CUDA GPUs.")
+
+    resolved_gpu_ids = list(range(num_gpus)) if gpu_ids is None else list(gpu_ids)
+    if len(resolved_gpu_ids) != num_gpus:
+        raise ValueError(
+            f"Expected {num_gpus} GPU ids, got {len(resolved_gpu_ids)}: {resolved_gpu_ids}."
+        )
+    if len(set(resolved_gpu_ids)) != len(resolved_gpu_ids):
+        raise ValueError(f"GPU ids must be unique, got {resolved_gpu_ids}.")
+    for gpu_id in resolved_gpu_ids:
+        if gpu_id < 0 or gpu_id >= visible_gpu_count:
+            raise ValueError(
+                f"GPU id {gpu_id} is out of range for {visible_gpu_count} visible CUDA GPU(s)."
+            )
+    return resolved_gpu_ids
+
+
+def _pgd_multi_gpu_worker(worker_index: int, worker_config: Dict[str, Any]) -> None:
+    import torch
+
+    from src.pgd_utils import PgdAttackConfig, build_pgd_artifact_contract
+
+    gpu_id = int(worker_config["gpu_id"])
+    torch.cuda.set_device(gpu_id)
+    device = torch.device("cuda", gpu_id)
+
+    config = load_eval_config(
+        config_path=worker_config["config_path"],
+        dataset_root=worker_config["dataset_root"],
+        metadata_root=worker_config["metadata_root"],
+        ssl_pretrained_path=worker_config["ssl_pretrained_path"],
+    )
+    config = apply_eval_path_fallbacks(
+        config=config,
+        dataset_root=worker_config["dataset_root"],
+        metadata_root=worker_config["metadata_root"],
+        trial_file=worker_config["trial_file"],
+        audio_root=worker_config["audio_root"],
+    )
+    paths = resolve_workflow_paths(
+        config=config,
+        output_dir=worker_config["output_dir"],
+        model_weights_path=worker_config["weights_path"],
+        require_training_assets=False,
+        require_dev_assets=worker_config["split"] == "dev" and worker_config["trial_file"] is None,
+        require_eval_assets=worker_config["split"] == "eval" and worker_config["trial_file"] is None,
+        dev_audio_root_override=worker_config["audio_root"] if worker_config["split"] == "dev" else None,
+        eval_audio_root_override=worker_config["audio_root"] if worker_config["split"] == "eval" else None,
+        dev_metadata_override=worker_config["trial_file"] if worker_config["split"] == "dev" else None,
+        eval_metadata_override=worker_config["trial_file"] if worker_config["split"] == "eval" else None,
+    )
+    config = apply_path_overrides(config, paths)
+
+    model = build_model(config["model_config"], device)
+    model.load_state_dict(torch.load(paths.model_weights_path, map_location=device))
+
+    attack_config = PgdAttackConfig(
+        epsilon=worker_config["epsilon"],
+        steps=worker_config["steps"],
+        alpha=worker_config["alpha"],
+        random_start=worker_config["random_start"],
+        clamp_min=worker_config["clamp_min"],
+        clamp_max=worker_config["clamp_max"],
+        save_adv_audio=worker_config["save_adv_audio"],
+    )
+    artifacts = build_pgd_artifact_contract(
+        run_dir=Path(worker_config["run_dir"]),
+        attack_config=attack_config,
+        clean_score_filename=worker_config["clean_score_filename"],
+        adv_score_filename=worker_config["adv_score_filename"],
+    )
+    rank_adv_audio_dir = artifacts.adv_audio_dir
+    if rank_adv_audio_dir is not None:
+        rank_adv_audio_dir = _worker_temp_dir(rank_adv_audio_dir, worker_index)
+
+    eval_loader, _, shard_trial_records = build_labeled_eval_loader(
+        paths=paths,
+        batch_size=int(worker_config["batch_size"]),
+        split=worker_config["split"],
+        trial_path=Path(worker_config["resolved_trial_path"]),
+        trial_records_override=worker_config["trial_records"],
+        num_workers=int(worker_config["num_workers"]),
+    )
+
+    clean_utterance_ids = None
+    if not worker_config["skip_clean_pass"]:
+        clean_utterance_ids, clean_scores, _ = _collect_scores(
+            data_loader=eval_loader,
+            model=model,
+            device=device,
+        )
+        _write_worker_payload(
+            run_dir=Path(worker_config["run_dir"]),
+            artifact_stem="clean_scores",
+            worker_index=worker_index,
+            payload={
+                "utterance_ids": clean_utterance_ids,
+                "scores": clean_scores,
+            },
+        )
+
+    adv_utterance_ids, adv_scores, attack_stats = _collect_scores(
+        data_loader=eval_loader,
+        model=model,
+        device=device,
+        attack=True,
+        attack_name="pgd",
+        epsilon=attack_config.epsilon,
+        steps=attack_config.steps,
+        alpha=attack_config.alpha,
+        random_start=attack_config.random_start,
+        clamp_min=attack_config.clamp_min,
+        clamp_max=attack_config.clamp_max,
+        adversarial_audio_dir=rank_adv_audio_dir,
+    )
+    if clean_utterance_ids is not None and adv_utterance_ids != clean_utterance_ids:
+        raise ValueError(
+            "Clean and adversarial shard ordering diverged in multi-GPU PGD evaluation."
+        )
+    expected_shard_utterance_ids = [record["utterance_id"] for record in shard_trial_records]
+    if adv_utterance_ids != expected_shard_utterance_ids:
+        raise ValueError(
+            "Shard ordering diverged from the trial-record shard in multi-GPU PGD evaluation."
+        )
+    _write_worker_payload(
+        run_dir=Path(worker_config["run_dir"]),
+        artifact_stem="pgd_scores",
+        worker_index=worker_index,
+        payload={
+            "utterance_ids": adv_utterance_ids,
+            "scores": adv_scores,
+            "attack_stats": attack_stats,
+        },
+    )
+
+
+def _run_multi_gpu_pgd_scoring_pipeline(
+    *,
+    config: Dict[str, Any],
+    paths,
+    config_path: str,
+    weights_path: str,
+    output_dir: str,
+    split: str,
+    dataset_root: Optional[str],
+    metadata_root: Optional[str],
+    trial_file: Optional[str],
+    audio_root: Optional[str],
+    ssl_pretrained_path: Optional[str],
+    effective_batch_size: int,
+    attack_config,
+    clean_score_filename: str,
+    adv_score_filename: Optional[str],
+    metrics_only: bool,
+    skip_clean_pass: bool,
+    num_gpus: int,
+    gpu_ids: Optional[Sequence[int]],
+    num_workers: int,
+) -> Dict[str, Any]:
+    import torch
+
+    from src.pgd_utils import build_adv_metric_summary, build_pgd_artifact_contract, build_pgd_summary_stub
+
+    if num_workers < 0:
+        raise ValueError(f"num_workers must be non-negative, got {num_workers}.")
+
+    resolved_gpu_ids = _resolve_multi_gpu_ids(num_gpus=num_gpus, gpu_ids=gpu_ids)
+    run_dir = paths.output_dir / config["model_tag"] / f"{split}_pgd_eval"
+    artifacts = build_pgd_artifact_contract(
+        run_dir=run_dir,
+        attack_config=attack_config,
+        clean_score_filename=clean_score_filename,
+        adv_score_filename=adv_score_filename,
+    )
+    artifact_warnings: List[str] = []
+
+    trial_path, trial_records, _ = _load_labeled_eval_records(paths=paths, split=split)
+    shard_records = _split_trial_records_evenly(trial_records, len(resolved_gpu_ids))
+    worker_config = {
+        "config_path": config_path,
+        "weights_path": weights_path,
+        "output_dir": output_dir,
+        "split": split,
+        "dataset_root": dataset_root,
+        "metadata_root": metadata_root,
+        "trial_file": trial_file,
+        "audio_root": audio_root,
+        "ssl_pretrained_path": ssl_pretrained_path,
+        "batch_size": effective_batch_size,
+        "epsilon": attack_config.epsilon,
+        "steps": attack_config.steps,
+        "alpha": attack_config.alpha,
+        "random_start": attack_config.random_start,
+        "clamp_min": attack_config.clamp_min,
+        "clamp_max": attack_config.clamp_max,
+        "save_adv_audio": attack_config.save_adv_audio,
+        "skip_clean_pass": skip_clean_pass,
+        "clean_score_filename": clean_score_filename,
+        "adv_score_filename": adv_score_filename,
+        "run_dir": str(run_dir),
+        "resolved_trial_path": str(trial_path),
+        "num_workers": num_workers,
+    }
+
+    dist_eval_dir = artifacts.run_dir / ".dist_eval"
+    if dist_eval_dir.exists():
+        shutil.rmtree(dist_eval_dir)
+
+    try:
+        multiprocessing_context = torch.multiprocessing.get_context("spawn")
+        processes = []
+        for worker_index, (gpu_id, worker_trial_records) in enumerate(zip(resolved_gpu_ids, shard_records)):
+            process = multiprocessing_context.Process(
+                target=_pgd_multi_gpu_worker,
+                args=(
+                    worker_index,
+                    {
+                        **worker_config,
+                        "gpu_id": gpu_id,
+                        "trial_records": worker_trial_records,
+                    },
+                ),
+            )
+            process.start()
+            processes.append(process)
+
+        failed_workers: List[str] = []
+        for worker_index, process in enumerate(processes):
+            process.join()
+            if process.exitcode != 0:
+                failed_workers.append(f"worker {worker_index} exitcode={process.exitcode}")
+        if failed_workers:
+            raise RuntimeError(
+                "Multi-GPU PGD evaluation failed. "
+                + ", ".join(failed_workers)
+            )
+
+        clean_utterance_ids = None
+        clean_scores = None
+        clean_metrics = None
+        if not skip_clean_pass:
+            clean_payloads = _read_worker_payloads(run_dir, "clean_scores", len(resolved_gpu_ids))
+            clean_utterance_ids, clean_scores = merge_gathered_score_payloads(
+                trial_records=trial_records,
+                gathered_payloads=clean_payloads,
+            )
+            clean_metrics = compute_cm_metrics_from_trial_records(
+                trial_records=trial_records,
+                utterance_ids=clean_utterance_ids,
+                scores=clean_scores,
+            )
+
+        adv_payloads = _read_worker_payloads(run_dir, "pgd_scores", len(resolved_gpu_ids))
+        adv_utterance_ids, adv_scores = merge_gathered_score_payloads(
+            trial_records=trial_records,
+            gathered_payloads=adv_payloads,
+        )
+        attack_stats = _merge_attack_stats_payloads(adv_payloads)
+        adv_metrics = compute_cm_metrics_from_trial_records(
+            trial_records=trial_records,
+            utterance_ids=adv_utterance_ids,
+            scores=adv_scores,
+        )
+        if artifacts.adv_audio_dir is not None:
+            _merge_worker_audio_dirs(artifacts.adv_audio_dir, len(resolved_gpu_ids))
+    finally:
+        if dist_eval_dir.exists():
+            shutil.rmtree(dist_eval_dir)
+
+    if clean_metrics is None:
+        metric_summary = build_adv_metric_summary(adv_metrics)
+    else:
+        metric_summary = build_metric_delta_summary(clean_metrics, adv_metrics)
+    summary = build_pgd_summary_stub(
+        split=split,
+        architecture=config["model_config"]["architecture"],
+        checkpoint_path=paths.model_weights_path,
+        dataset_root=paths.dataset_root,
+        trial_file=trial_path,
+        output_dir=run_dir,
+        device=f"multi_gpu:{','.join(str(gpu_id) for gpu_id in resolved_gpu_ids)}",
+        batch_size=effective_batch_size,
+        attack_config=attack_config,
+        artifacts=artifacts,
+    )
+    summary["utterance_count"] = len(adv_utterance_ids)
+    summary["metrics"] = metric_summary
+    summary["attack_stats"] = attack_stats
+    summary["num_gpus"] = len(resolved_gpu_ids)
+    summary["gpu_ids"] = resolved_gpu_ids
+    if skip_clean_pass:
+        summary["clean_score_path"] = None
+        summary["clean_metrics_path"] = None
+        summary["clean_pass_skipped"] = True
+
+    persisted_clean_score_path = None
+    persisted_adv_score_path = None
+    persisted_clean_metrics_path = None
+    persisted_adv_metrics_path = None
+    persisted_summary_json_path = None
+    persisted_summary_text_path = None
+    persisted_adv_audio_dir = artifacts.adv_audio_dir
+
+    if not metrics_only:
+        if not skip_clean_pass and clean_utterance_ids is not None and clean_scores is not None:
+            if _try_write_artifact(
+                action=lambda: _write_ordered_score_lines(
+                    save_path=artifacts.clean_score_path,
+                    trial_records=trial_records,
+                    utterance_ids=clean_utterance_ids,
+                    scores=clean_scores,
+                ),
+                description=f"clean score file '{artifacts.clean_score_path}'",
+                artifact_warnings=artifact_warnings,
+            ):
+                persisted_clean_score_path = artifacts.clean_score_path
+
+        if _try_write_artifact(
+            action=lambda: _write_ordered_score_lines(
+                save_path=artifacts.adv_score_path,
+                trial_records=trial_records,
+                utterance_ids=adv_utterance_ids,
+                scores=adv_scores,
+            ),
+            description=f"adversarial score file '{artifacts.adv_score_path}'",
+            artifact_warnings=artifact_warnings,
+        ):
+            persisted_adv_score_path = artifacts.adv_score_path
+
+        if not skip_clean_pass and clean_metrics is not None:
+            if _try_write_artifact(
+                action=lambda: write_metric_report(
+                    metrics_path=artifacts.clean_metrics_path,
+                    min_dcf=clean_metrics["min_dcf"],
+                    eer=clean_metrics["eer"],
+                    cllr=clean_metrics["cllr"],
+                ),
+                description=f"clean metric report '{artifacts.clean_metrics_path}'",
+                artifact_warnings=artifact_warnings,
+            ):
+                persisted_clean_metrics_path = artifacts.clean_metrics_path
+
+        if _try_write_artifact(
+            action=lambda: write_metric_report(
+                metrics_path=artifacts.adv_metrics_path,
+                min_dcf=adv_metrics["min_dcf"],
+                eer=adv_metrics["eer"],
+                cllr=adv_metrics["cllr"],
+            ),
+            description=f"adversarial metric report '{artifacts.adv_metrics_path}'",
+            artifact_warnings=artifact_warnings,
+        ):
+            persisted_adv_metrics_path = artifacts.adv_metrics_path
+
+        if _try_write_artifact(
+            action=lambda: write_metric_summary_json(artifacts.summary_json_path, summary),
+            description=f"PGD summary JSON '{artifacts.summary_json_path}'",
+            artifact_warnings=artifact_warnings,
+        ):
+            persisted_summary_json_path = artifacts.summary_json_path
+
+        if _try_write_artifact(
+            action=lambda: write_metric_summary_text(artifacts.summary_text_path, summary),
+            description=f"PGD summary text '{artifacts.summary_text_path}'",
+            artifact_warnings=artifact_warnings,
+        ):
+            persisted_summary_text_path = artifacts.summary_text_path
+    else:
+        persisted_adv_audio_dir = None
+
+    return {
+        "split": split,
+        "device": f"multi_gpu:{','.join(str(gpu_id) for gpu_id in resolved_gpu_ids)}",
+        "weights_path": paths.model_weights_path,
+        "trial_path": trial_path,
+        "batch_size": effective_batch_size,
+        "epsilon": attack_config.epsilon,
+        "steps": attack_config.steps,
+        "alpha": attack_config.resolved_alpha,
+        "random_start": attack_config.random_start,
+        "clamp_min": attack_config.clamp_min,
+        "clamp_max": attack_config.clamp_max,
+        "clean_score_path": persisted_clean_score_path,
+        "adv_score_path": persisted_adv_score_path,
+        "clean_metrics_path": persisted_clean_metrics_path,
+        "adv_metrics_path": persisted_adv_metrics_path,
+        "adv_audio_dir": persisted_adv_audio_dir,
+        "summary_json_path": persisted_summary_json_path,
+        "summary_text_path": persisted_summary_text_path,
+        "utterance_count": len(adv_utterance_ids),
+        "attack_stats": summary["attack_stats"],
+        "metrics": metric_summary,
+        "artifact_warnings": artifact_warnings,
+        "skip_clean_pass": skip_clean_pass,
+        "num_gpus": len(resolved_gpu_ids),
+        "gpu_ids": resolved_gpu_ids,
+    }
+
+
 def run_pgd_scoring_pipeline(
     config_path: str,
     weights_path: str,
@@ -945,6 +1533,9 @@ def run_pgd_scoring_pipeline(
     save_adv_audio: bool = False,
     metrics_only: bool = False,
     skip_clean_pass: bool = False,
+    num_gpus: int = 1,
+    gpu_ids: Optional[Sequence[int]] = None,
+    num_workers: int = 0,
 ) -> Dict[str, Any]:
     from src.pgd_utils import (
         PgdAttackConfig,
@@ -982,19 +1573,7 @@ def run_pgd_scoring_pipeline(
     )
     config = apply_path_overrides(config, paths)
 
-    device = resolve_eval_device()
-
-    model = build_model(config["model_config"], device)
-    model.load_state_dict(torch.load(paths.model_weights_path, map_location=device))
-
     effective_batch_size = batch_size or config["batch_size"]
-    eval_loader, trial_path, trial_records = build_labeled_eval_loader(
-        paths,
-        effective_batch_size,
-        split,
-    )
-
-    run_dir = paths.output_dir / config["model_tag"] / f"{split}_pgd_eval"
     attack_config = PgdAttackConfig(
         epsilon=epsilon,
         steps=steps,
@@ -1022,6 +1601,46 @@ def run_pgd_scoring_pipeline(
             save_adv_audio=False,
         )
 
+    if num_workers < 0:
+        raise ValueError(f"num_workers must be non-negative, got {num_workers}.")
+
+    if num_gpus > 1:
+        return _run_multi_gpu_pgd_scoring_pipeline(
+            config=config,
+            paths=paths,
+            config_path=config_path,
+            weights_path=weights_path,
+            output_dir=output_dir,
+            split=split,
+            dataset_root=dataset_root,
+            metadata_root=metadata_root,
+            trial_file=trial_file,
+            audio_root=audio_root,
+            ssl_pretrained_path=ssl_pretrained_path,
+            effective_batch_size=effective_batch_size,
+            attack_config=attack_config,
+            clean_score_filename=clean_score_filename,
+            adv_score_filename=adv_score_filename,
+            metrics_only=metrics_only,
+            skip_clean_pass=skip_clean_pass,
+            num_gpus=num_gpus,
+            gpu_ids=gpu_ids,
+            num_workers=num_workers,
+        )
+
+    device = resolve_eval_device()
+
+    model = build_model(config["model_config"], device)
+    model.load_state_dict(torch.load(paths.model_weights_path, map_location=device))
+
+    eval_loader, trial_path, trial_records = build_labeled_eval_loader(
+        paths=paths,
+        batch_size=effective_batch_size,
+        split=split,
+        num_workers=num_workers,
+    )
+
+    run_dir = paths.output_dir / config["model_tag"] / f"{split}_pgd_eval"
     artifacts = build_pgd_artifact_contract(
         run_dir=run_dir,
         attack_config=attack_config,
